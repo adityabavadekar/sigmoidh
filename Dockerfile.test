@@ -1,0 +1,10 @@
+FROM golang:latest
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends bubblewrap \
+  && rm -rf /var/lib/apt/lists/*
+
+
+ENV DANGEROUS_TEST_SANDBOX="1"
+
+WORKDIR /app

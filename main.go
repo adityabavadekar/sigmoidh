@@ -13,7 +13,7 @@ import (
 
 import "golang.design/x/clipboard"
 
-const VERSION = "v0.3.0"
+const VERSION = "v0.4.0"
 const EXIT_MESSAGE = "Exiting Sigmoidh. Goodbye!"
 
 func main() {
@@ -23,6 +23,7 @@ func main() {
 	oneShotPrompt := flag.String("prompt", "", "run a single prompt and exit")
 	listTools := flag.Bool("list-tools", false, "list available tools and exit")
 	readOnlyMode := flag.Bool("readonly", false, "enable read-only mode (only read tool allowed)")
+	ping := flag.Bool("ping", false, "ping me once the assigned task is completed")
 	version := flag.Bool("version", false, "print version and exit")
 	debug := flag.Bool("debug", false, "enable debug logging")
 	flag.Parse()
@@ -63,9 +64,13 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	fmt.Println(systemPrompt)
 
-	smh := NewSigmoidh(client, defaultModel, systemPrompt, workDir, readOnlyMode, debug)
+	if *debug {
+		fmt.Println(systemPrompt)
+	}
+	// TODO: tty check
+	observer := NewUi(os.Stderr, *debug)
+	smh := NewSigmoidh(client, defaultModel, systemPrompt, workDir, observer, readOnlyMode, debug)
 	defer smh.Close()
 	ctx := context.Background()
 
@@ -73,10 +78,10 @@ func main() {
 		*oneShotPrompt = strings.Join(args, " ")
 	}
 
-	repl(ctx, smh, *provider, defaultModel, *oneShotPrompt, readOnlyMode, debug)
+	repl(ctx, smh, *provider, defaultModel, *oneShotPrompt, readOnlyMode, ping, debug)
 }
 
-func repl(ctx context.Context, smh *Sigmoidh, provider, model string, oneShotPrompt string, readOnlyMode, debug *bool) {
+func repl(ctx context.Context, smh *Sigmoidh, provider, model string, oneShotPrompt string, readOnlyMode, ping, debug *bool) {
 	if oneShotPrompt != "" {
 		if err := smh.Run(ctx, oneShotPrompt); err != nil {
 			fatal(err)
@@ -84,10 +89,7 @@ func repl(ctx context.Context, smh *Sigmoidh, provider, model string, oneShotPro
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "[ OK ] Sigmoidh %s | (%s#%s) | Ctrl-D to Exit | /help for more\n", VERSION, provider, model)
-	if *readOnlyMode {
-		fmt.Fprintln(os.Stderr, "[ READ-ONLY MODE ENABLED ]")
-	}
+	smh.observer.OnBootstrap(VERSION, provider, model, *readOnlyMode)
 
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
@@ -118,8 +120,12 @@ func repl(ctx context.Context, smh *Sigmoidh, provider, model string, oneShotPro
 		if err := smh.Run(ctx, line); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 		}
+
+		if *ping {
+			PingUser()
+		}
 	}
-	smh.PrintStats()
+	smh.OnRunComplete()
 }
 
 func copyToClipboard(text string) error {

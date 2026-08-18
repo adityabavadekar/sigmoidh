@@ -36,6 +36,7 @@ type Sigmoidh struct {
 	messages    []litellm.Message
 	historyFile *os.File
 	lastTexts   []string
+	observer    AgentObserver
 	debug       bool
 	stats       *RunStats
 }
@@ -60,12 +61,13 @@ type historyResult struct {
 	IsError   bool   `json:"is_error"`
 }
 
-func NewSigmoidh(client *litellm.Client, model, system, workDir string, readOnlyMode *bool, debug *bool) *Sigmoidh {
+func NewSigmoidh(client *litellm.Client, model, system, workDir string, observer AgentObserver, readOnlyMode *bool, debug *bool) *Sigmoidh {
 	s := &Sigmoidh{
 		client:   client,
 		model:    model,
 		workDir:  workDir,
 		messages: []litellm.Message{litellm.System(system)},
+		observer: observer,
 		debug:    *debug,
 		stats:    &RunStats{},
 	}
@@ -91,32 +93,13 @@ func (s *Sigmoidh) Close() {
 		s.historyFile.Close()
 	}
 }
-func humanNumber(n int) string {
-	switch {
-	case n >= 1_000_000_000:
-		return fmt.Sprintf("%.1fB", float64(n)/1_000_000_000)
-	case n >= 1_000_000:
-		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
-	case n >= 1_000:
-		return fmt.Sprintf("%.1fK", float64(n)/1_000)
-	default:
-		return fmt.Sprintf("%d", n)
-	}
-}
 
 func (s *Sigmoidh) PrintStats() {
-	fmt.Fprintln(os.Stderr, "\nRun Stats:")
-	fmt.Fprintf(os.Stderr, "  Total Turns: %s\n", humanNumber(s.stats.TotalTurns))
-	fmt.Fprintf(os.Stderr, "  %s Tool Calls | %s Input Tokens | %s Output Tokens | %s Total Tokens | %s Reasoning Tokens | %s Cache Read Tokens | %s Cache Write Tokens | %s Total Cached Tokens\n",
-		humanNumber(s.stats.TotalToolCalls),
-		humanNumber(s.stats.TotalInputTokens),
-		humanNumber(s.stats.TotalOutputTokens),
-		humanNumber(s.stats.TotalTokens),
-		humanNumber(s.stats.TotalReasoningTokens),
-		humanNumber(s.stats.TotalCacheReadTokens),
-		humanNumber(s.stats.TotalCacheWriteTokens),
-		humanNumber(s.stats.TotalCachedTokens),
-	)
+	s.observer.OnPrintUsageStats(s.stats)
+}
+
+func (s *Sigmoidh) OnRunComplete() {
+	s.observer.OnRunComplete(s.stats)
 }
 
 func (s *Sigmoidh) writeHistory(entry historyEntry) {
@@ -156,12 +139,7 @@ func (s *Sigmoidh) Run(ctx context.Context, input string) error {
 			return err
 		}
 		s.messages = append(s.messages, litellm.Assistant(resp.Blocks...))
-		fmt.Fprintf(os.Stderr, "[TURN %d] model=%s provider=%s tokens=%d inputTokens=%d outputTokens=%d reasoningTokens=%d cachedReadTokens=%d cachedWriteTokens=%d\n",
-			turn+1, resp.Usage.Model, resp.Usage.Provider,
-			resp.Usage.TotalTokens, resp.Usage.InputTokens, resp.Usage.OutputTokens, resp.Usage.ReasoningTokens,
-			resp.Usage.CacheReadTokens, resp.Usage.CacheWriteTokens,
-		)
-
+		s.observer.OnTurnStart(turn, resp.Usage.Model, resp.Usage)
 		s.stats.TotalInputTokens += resp.Usage.InputTokens
 		s.stats.TotalOutputTokens += resp.Usage.OutputTokens
 		s.stats.TotalTokens += resp.Usage.TotalTokens
@@ -171,12 +149,12 @@ func (s *Sigmoidh) Run(ctx context.Context, input string) error {
 		s.stats.TotalCachedTokens += resp.Usage.CacheReadTokens + resp.Usage.CacheWriteTokens
 
 		if text := resp.Reasoning(); text != "" {
-			fmt.Fprintf(os.Stderr, "[REASONING-START]\n %s\n[REASONING-END]\n\n", text)
+			s.observer.OnReasoning(text)
 		}
 
 		textResp := resp.Text()
 		if textResp != "" {
-			fmt.Println(textResp)
+			s.observer.OnAssistantText(textResp)
 		}
 
 		calls := resp.ToolCalls()
@@ -206,12 +184,12 @@ func (s *Sigmoidh) Run(ctx context.Context, input string) error {
 		resultEntries := make([]historyResult, len(calls))
 
 		for i, call := range calls {
-			logCall(call.Name, call.Arguments, s.debug)
+			s.observer.OnToolCall(call.Name, call.Arguments)
 			out, isErr := agenttools.RunTool(ctx, call.Name, call.Arguments, s.workDir)
 			if out == "" && !isErr {
 				out = "(no output)"
 			}
-			logResult(out, isErr, s.debug)
+			s.observer.OnToolResult(call.Name, out, isErr)
 			results[i] = litellm.ToolResultBlock{
 				ToolUseID: call.ID,
 				Content:   []litellm.Block{litellm.Text(out)},
@@ -232,23 +210,4 @@ func (s *Sigmoidh) Run(ctx context.Context, input string) error {
 	}
 
 	return fmt.Errorf("stopped after %d turns", maxTurns)
-}
-
-func logCall(name string, args json.RawMessage, debug bool) {
-	fmt.Fprintf(os.Stderr, "==> %s %s\n", name, string(args))
-}
-
-func logResult(out string, isErr bool, debug bool) {
-	status := "ok"
-	if isErr {
-		status = "error"
-	}
-	if !debug {
-		return
-	}
-
-	fmt.Fprintf(os.Stderr, "################## [START] tool result \t##################\n")
-	fmt.Fprintf(os.Stderr, "  %s\n", out)
-	fmt.Fprintf(os.Stderr, "################## [END]   tool result ##################\n")
-	fmt.Fprintf(os.Stderr, "  %s (%d bytes)\n", status, len(out))
 }

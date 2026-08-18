@@ -4,7 +4,6 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends bubblewrap iputils-ping curl patch ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
-
 ENV DANGEROUS_TEST_SANDBOX="1"
 
 WORKDIR /app

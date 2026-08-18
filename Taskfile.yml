@@ -1,0 +1,50 @@
+version: '3'
+
+tasks:
+  default:
+    desc: Run all checks
+    cmds:
+      - task: check
+
+  test:
+    desc: Run tests
+    cmd: ./test.sh
+
+  check:
+    desc: Run formatting, vet, and tests
+    cmds:
+      - test -z "$(gofmt -l .)"
+      - go vet ./...
+      - ./test.sh
+
+  tidy:
+    desc: Tidy Go dependencies
+    cmd: go mod tidy
+
+  build:
+    desc: Build Sigmoidh
+    cmd: go build -o sigmoidh .
+
+  run:
+    desc: Run Sigmoidh
+    cmd: go run .
+
+  clean:
+    desc: Remove build artifacts
+    cmd: rm -f sigmoidh
+
+  install:
+    desc: Set up the project
+    cmds:
+      - go mod tidy
+      - chmod +x .githooks/pre-commit
+      - git config core.hooksPath .githooks
+      - go build -o sigmoidh .
+      - |
+        echo
+        echo "[+] Sigmoidh setup complete"
+        echo
+        echo "Usage:"
+        echo "  task run      Run Sigmoidh"
+        echo "  Or"
+        echo "  go run ."

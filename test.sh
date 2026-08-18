@@ -15,6 +15,11 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  echo "[*] Building test image..."
+  docker build -t "$IMAGE" -f Dockerfile.test .
+fi
+
 docker volume create "$MOD_CACHE" >/dev/null
 docker volume create "$BUILD_CACHE" >/dev/null
 

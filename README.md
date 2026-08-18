@@ -42,3 +42,5 @@ In case modules were updated, repeat Steps 1 and 2.
 - OpenRouter
 
 Although the project uses LiteLLM module which supports most of well known providers, `provider.go` needs to be updated to handle the provider-specific calling.
+
+You can also use `task` tool.

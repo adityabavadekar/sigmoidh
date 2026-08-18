@@ -15,8 +15,7 @@ var textLikeTypes = []string{
 }
 
 // isTextFile sniffs content and rejects anything that isn't text, JSON, YAML,
-// CSV, or similar. CSV/TSV have no distinct MIME signature and read back as
-// text/plain, so they pass without special-casing the extension.
+// CSV, or similar.
 func isTextFile(data []byte) bool {
 	if len(data) == 0 {
 		return true
@@ -38,7 +37,6 @@ func isWithinPath(path, root string) bool {
 }
 
 // isEnvFile matches .env and its variants (.env.local, .env.production, ...)
-// by filename, regardless of directory.
 func isEnvFile(path string) bool {
 	base := filepath.Base(path)
 	return base == ".env" || strings.HasPrefix(base, ".env.")
@@ -73,22 +71,12 @@ var protectedRoots = []string{
 }
 
 // shallowProtectedRoots are mount-point directories that exist specifically
-// to have other filesystems mounted under them. The bare mount point itself
-// is protected (deleting /mnt or /media would be destructive), but what's
-// mounted under it is a separate, arbitrary filesystem the guard has no
-// basis to treat as part of the protected system tree — e.g. /mnt/data is
-// an ordinary mounted volume, not part of the host OS, and should not be
-// blocked just because /mnt is.
+// to have other filesystems mounted under them.
 var shallowProtectedRoots = []string{
 	"/mnt", "/media",
 }
 
 // resolvePath expands a leading ~ and returns a cleaned absolute path.
-// filepath.Abs/Clean operate on the string without any fixed-size buffers,
-// so arbitrarily long paths are handled the same as short ones. This is a
-// purely lexical operation: it never touches the filesystem, so a symlink
-// anywhere in the path is not followed here — see resolveRealPath for the
-// filesystem-aware resolution isProtectedPath actually needs.
 func resolvePath(p string) string {
 	if p == "~" || strings.HasPrefix(p, "~/") {
 		if home, err := os.UserHomeDir(); err == nil {
@@ -102,21 +90,9 @@ func resolvePath(p string) string {
 	return filepath.Clean(abs)
 }
 
-// resolveRealPath takes the lexically-cleaned absolute path from
+// resolveRealPath takes the absolute path from
 // resolvePath and resolves it through the filesystem so a symlink cannot be
-// used to reach a protected location under an innocuous-looking name — e.g.
-// a symlink at ~/scratch pointing to /etc must still be recognized as
-// touching /etc.
-//
-// The target of a destructive command may not exist yet (the command could
-// be about to create it, or a parent directory might exist while the leaf
-// does not), so this walks from the longest existing prefix outward:
-// filepath.EvalSymlinks is tried on the full path first, and on failure
-// (typically because some suffix doesn't exist) progressively shorter
-// prefixes are tried until one resolves or nothing is left to try. Whatever
-// suffix wasn't resolved (because it doesn't exist on disk) is reattached
-// lexically to the resolved prefix, since a nonexistent path component
-// cannot itself be a symlink.
+// used to reach a protected location under an innocuous-looking name.
 func resolveRealPath(cleaned string) string {
 	if cleaned == "/" {
 		return "/"
@@ -130,10 +106,6 @@ func resolveRealPath(cleaned string) string {
 		}
 		parent := filepath.Dir(cur)
 		if parent == cur {
-			// Reached "/" (or a malformed path that stopped shrinking)
-			// without ever successfully resolving anything; nothing on
-			// this path exists, so there's nothing a symlink could have
-			// redirected — fall back to the lexical form.
 			return cleaned
 		}
 		remainder = "/" + filepath.Base(cur) + remainder
@@ -142,23 +114,7 @@ func resolveRealPath(cleaned string) string {
 }
 
 // isProtectedPath reports whether p resolves to a system root, the user's
-// home directory, or anything nested inside one of them. Mount-point
-// directories (/mnt, /media) are protected only at the bare mount point —
-// a path one or more levels under them is an arbitrary mounted volume, not
-// part of the protected system tree, and is not flagged here.
-//
-// Resolution goes through resolveRealPath, not just resolvePath, so a
-// symlink cannot be used to reach a protected location under a path that
-// looks unprotected on its face.
-//
-// Known limitation: comparisons against protectedRoots/shallowProtectedRoots
-// are byte-exact. On a case-insensitive filesystem (a mounted FAT/exFAT/NTFS
-// volume, or certain macOS/Linux configurations), a differently-cased path
-// that the OS treats as the same location — e.g. "/ETC" vs "/etc" — will not
-// be recognized as a match here. Whether a given path's filesystem is
-// case-insensitive is a per-mount (and on some Linux filesystems, even
-// per-directory) property that isn't reliably inferable from the target OS
-// alone, so this isn't handled rather than risk an incorrect platform guess.
+// home directory, or anything nested inside one of them.
 func isProtectedPath(p string) bool {
 	r := resolveRealPath(resolvePath(p))
 	if r == "/" {
@@ -178,15 +134,6 @@ func isProtectedPath(p string) bool {
 		}
 	}
 	if home, err := os.UserHomeDir(); err != nil || home == "" {
-		// $HOME is unset or unreadable — home-directory protection cannot
-		// be applied for this check. This is a real gap in coverage (a
-		// destructive command against the home directory will not be
-		// caught by this branch), not merely an unused-return situation,
-		// so it is surfaced rather than silently skipped. onHomeDirUnknown
-		// is nil by default and therefore a no-op unless the embedding
-		// program wires it up; isProtectedPath's own bool-returning
-		// signature is preserved so none of its existing callers need to
-		// change to observe this.
 		if onHomeDirUnknown != nil {
 			onHomeDirUnknown(p)
 		}
@@ -207,10 +154,7 @@ func isProtectedCommandPath(path, workingDir string) bool {
 
 // onHomeDirUnknown, if set, is called whenever isProtectedPath cannot
 // determine the user's home directory and therefore could not check
-// whether the given path falls inside it. Left nil (the default), this is
-// a no-op — set it if the embedding program wants visibility into checks
-// that ran with degraded home-directory coverage, e.g. to log a warning
-// rather than have the gap pass unnoticed.
+// whether the given path falls inside it.
 var onHomeDirUnknown func(checkedPath string)
 
 type shellToken struct {
@@ -219,21 +163,7 @@ type shellToken struct {
 }
 
 // tokenizeShell splits cmd on unquoted whitespace and operators, tracking
-// which tokens came from inside a quote. It is not a full shell parser: it
-// exists only to keep pattern matching from firing on quoted text such as
-// echo 'rm -rf /' > file.txt, and to isolate each &&/||/;/|/&-separated,
-// newline-separated, or parenthesized/substituted segment so a dangerous
-// command anywhere in a chain — including inside (...), $(...), or
-// backticks — is not hidden by a safe one elsewhere.
-//
-// Parens, backticks, and $( are treated only as segment boundaries, not as
-// balanced grouping constructs: this guard never needs to reconstruct real
-// shell structure, it only needs every run of unquoted words that could be
-// a command name followed by its arguments to appear as its own segment.
-// Treating "(" and ")" as boundaries (rather than tracking nesting depth)
-// is deliberately conservative — it can only ever split a dangerous command
-// into more, still-individually-checked pieces, never hide one by merging
-// it with something else.
+// which tokens came from inside a quote. It is not a full shell parser.
 func tokenizeShell(cmd string) []shellToken {
 	var tokens []shellToken
 	var cur strings.Builder
@@ -264,26 +194,14 @@ func tokenizeShell(cmd string) []shellToken {
 		case ch == ' ' || ch == '\t':
 			flush()
 		case ch == '\n' || ch == '\r':
-			// A newline separates independent commands just like ";" —
-			// unlike a plain space, it must also break apart whatever
-			// segment came before it, not merely end the current token.
 			flush()
 			tokens = append(tokens, shellToken{"\n", false})
 		case ch == '$' && i+1 < len(runes) && runes[i+1] == '(':
-			// Start of a $(...) command substitution. The "$" carries no
-			// command-word meaning on its own; treat the "(" that follows
-			// (handled by the next iteration) as the actual boundary and
-			// simply drop the "$" so it isn't glued onto the next token.
 			flush()
 		case ch == '(' || ch == ')':
-			// Subshell / substitution delimiters. See function doc: these
-			// are boundaries only, nesting is not tracked.
 			flush()
 			tokens = append(tokens, shellToken{string(ch), false})
 		case ch == '`':
-			// Backtick command substitution delimiter — same treatment as
-			// parens: a boundary marking off whatever is inside from
-			// whatever is outside, in both directions.
 			flush()
 			tokens = append(tokens, shellToken{"`", false})
 		case ch == '&' || ch == '|' || ch == ';':
@@ -297,10 +215,6 @@ func tokenizeShell(cmd string) []shellToken {
 	return tokens
 }
 
-// shellSegments groups unquoted tokens into independent command segments,
-// split at &&, ||, ;, |, &, newlines, and subshell/substitution delimiters
-// ( ) $( `. Quoted tokens are dropped entirely: they are argument data,
-// never command words, so they cannot trigger a match.
 func shellSegments(cmd string) [][]string {
 	var segs [][]string
 	var cur []string
@@ -332,10 +246,7 @@ func isShellOperator(s string) bool {
 }
 
 // wrapperCommands are programs that invoke another command rather than
-// doing anything destructive themselves. When one appears at the head of a
-// segment, it is stripped (along with its own flags/assignments) so the
-// real command underneath can be matched. Wrappers can stack, e.g.
-// "sudo env -- rm -rf /", so stripping runs in a loop.
+// doing anything destructive themselves.
 var wrapperCommands = map[string]bool{
 	"sudo": true, "env": true, "command": true,
 }
@@ -343,9 +254,7 @@ var wrapperCommands = map[string]bool{
 // stripWrappers removes leading wrapper commands (and sudo, since it is
 // checked separately below for its own destructive-target semantics) along
 // with their flags and VAR=val assignment arguments, returning the
-// remaining words with the real command first. It never strips past a
-// non-flag, non-assignment, non-wrapper word, so it cannot accidentally eat
-// into a destructive command's own arguments.
+// remaining words with the real command first.
 func stripWrappers(seg []string) []string {
 	for len(seg) > 0 && wrapperCommands[seg[0]] {
 		rest := seg[1:]
@@ -355,8 +264,6 @@ func stripWrappers(seg []string) []string {
 			a := rest[i]
 			switch {
 			case a == "--":
-				// "--" ends the wrapper's own option list; the word right
-				// after it is the real command, not consumed flag data.
 				i++
 				stop = true
 			case strings.HasPrefix(a, "-"):
@@ -366,10 +273,6 @@ func stripWrappers(seg []string) []string {
 				i++
 				continue
 			default:
-				// First bare word: either the real command, or (for
-				// stacked wrappers like "sudo env rm ...") another
-				// wrapper, which the outer loop will strip on its next
-				// pass.
 				stop = true
 			}
 			if stop {
@@ -410,32 +313,14 @@ var destructiveCommands = map[string]bool{
 	"chmod": true, "chown": true, "wipefs": true,
 }
 
-// devTargetingCommands take a raw block device path (as a bare argument, or
-// via of=/if=) rather than an ordinary file path, so they need the /dev/
-// substring check in addition to (or instead of) the protected-root check.
 var devTargetingCommands = map[string]bool{
 	"dd": true, "mkfs": true, "wipefs": true,
 }
 
-// mkfsPrefix catches mkfs.ext4, mkfs.xfs, mkfs.btrfs, etc: mkfs is normally
-// invoked as one of these filesystem-specific binaries, not bare "mkfs".
 func isMkfsVariant(name string) bool {
 	return name == "mkfs" || strings.HasPrefix(name, "mkfs.")
 }
 
-// forkBombPattern matches the classic fork-bomb shape independent of the
-// identifier used (":", a named function, or no name at all before the
-// parens) and independent of whitespace:
-//
-//	[NAME] '(' ')' '{' NAME '|' NAME '&' '}' ';' NAME
-//
-// The leading NAME is optional — "(){ :|:& };:" is a valid variant with
-// nothing before the parens — but when present it must agree with the two
-// names inside the braces, and the trailing invocation after ";" must also
-// match whichever name was used inside. This runs against the raw, unsplit
-// command string rather than per-segment output, because shellSegments now
-// treats "(" and ")" as boundaries and would otherwise never present the
-// bomb's defining "(){ ... }" shape as a single contiguous piece to check.
 var forkBombPattern = regexp.MustCompile(
 	`(?:function\s+)?(\S*)\s*\(\s*\)\s*\{\s*(\S+)\s*\|\s*(\S+)\s*&\s*\}\s*;\s*(\S+)`,
 )
@@ -460,11 +345,6 @@ func isForkBomb(cmd string) bool {
 // command-wrapped destructive commands regardless of target, a device-
 // targeting command (dd/mkfs/wipefs) pointed at /dev, or a fork bomb
 // pattern. It returns the offending segment for use in the guard message.
-//
-// Segments are derived from shellSegments, which already breaks the
-// command apart at &&, ||, ;, |, &, newlines, and subshell/substitution
-// delimiters, so a destructive command hidden inside (...), $(...), or
-// backticks is checked exactly like one at the top level.
 func destructiveCommandOnProtectedPath(cmd string, cwd ...string) (string, bool) {
 	workingDir := "."
 	if len(cwd) > 0 && cwd[0] != "" {
@@ -489,10 +369,6 @@ func destructiveCommandOnProtectedPath(cmd string, cwd ...string) (string, bool)
 			continue
 		}
 		if isMkfsVariant(name) {
-			// Normalize mkfs.ext4 / mkfs.xfs / mkfs.btrfs / etc. to "mkfs"
-			// for the devTargetingCommands lookup below. The message
-			// returned to the caller still uses rawSeg, so the original
-			// name (e.g. "mkfs.ext4") is preserved there.
 			name = "mkfs"
 		}
 

@@ -1,8 +1,10 @@
-package main
+package tools
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -69,6 +71,7 @@ func TestIsProtectedPath(t *testing.T) {
 }
 
 func TestDestructiveCommandOnProtectedPath(t *testing.T) {
+	cwd, _ := os.Getwd()
 	blockedCases := []string{
 		// Basic rm variants.
 		"rm -rf /",
@@ -299,13 +302,13 @@ func TestDestructiveCommandOnProtectedPath(t *testing.T) {
 	}
 
 	for _, c := range blockedCases {
-		if _, blocked := destructiveCommandOnProtectedPath(c); !blocked {
+		if _, blocked := destructiveCommandOnProtectedPath(c, cwd); !blocked {
 			t.Errorf("%q: expected blocked, was allowed", c)
 		}
 	}
 
 	for _, c := range allowedCases {
-		if seg, blocked := destructiveCommandOnProtectedPath(c); blocked {
+		if seg, blocked := destructiveCommandOnProtectedPath(c, cwd); blocked {
 			t.Errorf("%q: expected allowed, was blocked on segment %q", c, seg)
 		}
 	}
@@ -339,7 +342,7 @@ func TestDestructiveCommandOnProtectedPath(t *testing.T) {
 	}
 	longCommand += " && rm -rf /"
 
-	if _, blocked := destructiveCommandOnProtectedPath(longCommand); !blocked {
+	if _, blocked := destructiveCommandOnProtectedPath(longCommand, cwd); !blocked {
 		t.Errorf("very long destructive command: expected blocked, was allowed")
 	}
 
@@ -353,7 +356,7 @@ func TestDestructiveCommandOnProtectedPath(t *testing.T) {
 	}
 
 	for _, c := range stressCommands {
-		if _, blocked := destructiveCommandOnProtectedPath(c); !blocked {
+		if _, blocked := destructiveCommandOnProtectedPath(c, cwd); !blocked {
 			t.Errorf("stress command: expected blocked, was allowed")
 		}
 	}
@@ -364,47 +367,151 @@ func TestRunReadGuards(t *testing.T) {
 
 	envPath := filepath.Join(dir, ".env")
 	os.WriteFile(envPath, []byte("SECRET=1"), 0o644)
-	if out, isErr := runRead(envPath, 0, 0); !isErr {
+	if out, isErr := runRead(envPath, 0, 0, false); !isErr {
 		t.Errorf("runRead(.env) should refuse, got ok output: %s", out)
 	}
 
 	binPath := filepath.Join(dir, "image.bin")
 	os.WriteFile(binPath, []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0}, 0o644)
-	if out, isErr := runRead(binPath, 0, 0); !isErr {
+	if out, isErr := runRead(binPath, 0, 0, false); !isErr {
 		t.Errorf("runRead(binary) should refuse, got ok output: %s", out)
 	}
 
 	csvPath := filepath.Join(dir, "data.csv")
 	os.WriteFile(csvPath, []byte("a,b\n1,2\n"), 0o644)
-	if out, isErr := runRead(csvPath, 0, 0); isErr {
+	if out, isErr := runRead(csvPath, 0, 0, false); isErr {
 		t.Errorf("runRead(csv) should succeed, got error: %s", out)
 	}
 
-	txtPath := filepath.Join(dir, "notes.txt")
-	os.WriteFile(txtPath, []byte("line1\nline2\nline3\n"), 0o644)
-	if out, isErr := runRead(txtPath, 0, 0); isErr || out != "line1\nline2\nline3\n" {
-		t.Errorf("runRead(txt) mismatch: %q err=%v", out, isErr)
+	goModPath := filepath.Join("..", "go.mod")
+	if out, isErr := runRead(goModPath, 0, 0, false); isErr {
+		t.Errorf("runRead(valid) should succeed, got error: %s", out)
+	}
+
+	goModPath = filepath.Join("..", "main.go")
+	if out, isErr := runRead(goModPath, 0, 0, false); isErr {
+		t.Errorf("runRead(valid) should succeed, got error: %s", out)
+	}
+}
+
+func TestRunReadFormatting(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "lines.txt")
+	os.WriteFile(path, []byte("one\ntwo\nthree\n"), 0o644)
+
+	out, isErr := runRead(path, 2, 1, false)
+	if isErr {
+		t.Fatalf("runRead(offset/limit) failed: %s", out)
+	}
+	want := "two\n\n[1 more lines in file. Use offset=3 to continue.]"
+	if out != want {
+		t.Fatalf("runRead(offset/limit) = %q, want %q", out, want)
+	}
+
+	out, isErr = runRead(path, 4, 0, false)
+	if !isErr {
+		t.Fatalf("runRead(offset beyond EOF) should fail, got: %s", out)
+	}
+	if out != "Offset 4 is beyond end of file (3 lines total)" {
+		t.Fatalf("runRead(offset beyond EOF) = %q", out)
+	}
+
+	out, isErr = runRead(path, 1, 3, false)
+	if isErr {
+		t.Fatalf("runRead(exact limit) failed: %s", out)
+	}
+	if out != "one\ntwo\nthree" {
+		t.Fatalf("runRead(exact limit) = %q", out)
 	}
 }
 
 func TestRunWriteGuards(t *testing.T) {
 	dir := t.TempDir()
+	cwd, _ := os.Getwd()
 
-	if out, isErr := runWrite(filepath.Join(dir, ".env"), "SECRET=1"); !isErr {
+	if out, isErr := runWrite(filepath.Join(dir, ".env"), "SECRET=1", cwd); !isErr {
 		t.Errorf("runWrite(.env) should refuse, got ok output: %s", out)
 	}
 
-	if out, isErr := runWrite("/etc/should-not-write", "x"); !isErr {
+	if out, isErr := runWrite("/etc/should-not-write", "x", cwd); !isErr {
 		t.Errorf("runWrite(/etc/...) should refuse, got ok output: %s", out)
 	}
 
 	safe := filepath.Join(dir, "sub", "file.txt")
-	if out, isErr := runWrite(safe, "hello"); isErr {
+	if out, isErr := runWrite(safe, "hello", cwd); isErr {
 		t.Errorf("runWrite(safe path) should succeed, got error: %s", out)
 	}
 	data, _ := os.ReadFile(safe)
 	if string(data) != "hello" {
 		t.Errorf("runWrite content mismatch: %q", data)
+	}
+}
+
+func TestListFilesAndBatchRead(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("alpha\nbeta\n"), 0o644)
+	os.Mkdir(filepath.Join(dir, "sub"), 0o755)
+	os.WriteFile(filepath.Join(dir, "sub", "b.txt"), []byte("bravo\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, ".env"), []byte("SECRET=1\n"), 0o644)
+
+	out, isErr := runListFiles("", 20, dir)
+	if isErr {
+		t.Fatalf("runListFiles failed: %s", out)
+	}
+	if !strings.Contains(out, "a.txt") || !strings.Contains(out, "sub/") || !strings.Contains(out, "sub/b.txt") {
+		t.Fatalf("runListFiles missing expected entries: %s", out)
+	}
+	if strings.Contains(out, ".env") {
+		t.Fatalf("runListFiles included sensitive file: %s", out)
+	}
+
+	out, isErr = runBatchRead([]string{"a.txt", "sub/b.txt"}, 1, 1, false, dir)
+	if isErr {
+		t.Fatalf("runBatchRead failed: %s", out)
+	}
+	if !strings.Contains(out, "==> a.txt\nalpha") || !strings.Contains(out, "==> sub/b.txt\nbravo") {
+		t.Fatalf("runBatchRead output mismatch: %s", out)
+	}
+}
+
+func TestRunApplyPatch(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("one\ntwo\n"), 0o644)
+
+	patch := `--- file.txt
++++ file.txt
+@@ -1,2 +1,2 @@
+ one
+-two
++TWO
+`
+	out, isErr := runApplyPatch(context.Background(), patch, 0, false, dir)
+	if isErr {
+		t.Fatalf("runApplyPatch failed: %s", out)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "file.txt"))
+	if string(data) != "one\nTWO\n" {
+		t.Fatalf("patched content = %q", data)
+	}
+}
+
+func TestExecSession(t *testing.T) {
+	cwd, _ := os.Getwd()
+	out, isErr := startExecSession("cat", 50, cwd)
+	if isErr {
+		t.Fatalf("startExecSession failed: %s", out)
+	}
+	if !strings.Contains(out, "session_id: ") {
+		t.Fatalf("missing session id: %s", out)
+	}
+	id := execSessions.next
+
+	out, isErr = writeExecStdin(id, "hello\n", true, 50)
+	if isErr {
+		t.Fatalf("writeExecStdin failed: %s", out)
+	}
+	if !strings.Contains(out, "hello") {
+		t.Fatalf("session output missing stdin echo: %s", out)
 	}
 }
 
@@ -421,38 +528,36 @@ func requireDangerousTestSandbox(t *testing.T) {
 }
 
 func TestRunBashGuards(t *testing.T) {
+	cwd, _ := os.Getwd()
 
-	// t.Run("pwd", func(t *testing.T) {
-	// 	out, isErr := runBash(context.Background(), "pwd")
-	// 	if isErr {
-	// 		t.Fatalf("runBash(pwd) failed: %s", out)
-	// 	}
-	// 	if out != "/\n" {
-	// 		t.Fatalf("runBash(pwd) output mismatch: %q", out)
-	// 	}
-	// })
-	//
+	t.Run("pwd", func(t *testing.T) {
+		out, isErr := runBash(context.Background(), "pwd", cwd)
+		if isErr {
+			t.Fatalf("runBash(pwd) failed: %s", out)
+		}
+	})
+
 	requireDangerousTestSandbox(t)
 
-	// ctx := context.Background()
+	ctx := context.Background()
 
-	// cases := []string{
-	// 	"rm -rf /",
-	// 	"rm -rf /etc",
-	// 	"rm -rf /var/lib",
-	// 	"sudo rm -rf /",
-	// 	"dd if=/dev/zero of=/dev/sda",
-	// 	"mkfs.ext4 /dev/sda",
-	// 	":(){ :|:& };:",
-	// }
-	//
-	// for _, command := range cases {
-	// 	t.Run(command, func(t *testing.T) {
-	// 		out, isErr := runBash(ctx, command)
-	//
-	// 		if !isErr {
-	// 			t.Fatalf("expected refusal for %q, got: %s", command, out)
-	// 		}
-	// 	})
-	// }
+	cases := []string{
+		"rm -rf /",
+		"rm -rf /etc",
+		"rm -rf /var/lib",
+		"sudo rm -rf /",
+		"dd if=/dev/zero of=/dev/sda",
+		"mkfs.ext4 /dev/sda",
+		":(){ :|:& };:",
+	}
+
+	for _, command := range cases {
+		t.Run(command, func(t *testing.T) {
+			out, isErr := runBash(ctx, command, cwd)
+
+			if !isErr {
+				t.Fatalf("expected refusal for %q, got: %s", command, out)
+			}
+		})
+	}
 }

@@ -21,6 +21,10 @@ docker volume create "$BUILD_CACHE" >/dev/null
 docker create \
   --name "$CONTAINER" \
   --security-opt seccomp=unconfined \
+  --security-opt apparmor=unconfined \
+  --security-opt systempaths=unconfined \
+  --cap-add SYS_ADMIN \
+  --cap-add SYS_ADMIN \
   --workdir /app \
   --mount "type=volume,src=$MOD_CACHE,dst=/go/pkg/mod" \
   --mount "type=volume,src=$BUILD_CACHE,dst=/root/.cache/go-build" \
@@ -35,7 +39,7 @@ echo "[*] Copying project..."
 docker cp "$PWD/." "$CONTAINER:/app/"
 
 echo
-echo "[+] Running go test -v"
+echo "[+] Running go test -v ./..."
 echo
 
-docker exec -it "$CONTAINER" go test -v
+docker exec "$CONTAINER" go test -v ./...

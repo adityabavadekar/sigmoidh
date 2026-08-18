@@ -6,43 +6,29 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
+	"strconv"
 	"strings"
 )
 
-const defaultSystem = `You are a terminal coding and task agent.
-Use the bash, read, and write tools to inspect and change the filesystem.
-Prefer small, verifiable steps. Be direct and concise in your replies.`
-
-func getProjectTree(level int) (string, error) {
-	cmd := exec.Command("tree", "-L", fmt.Sprintf("%d", level))
-	cmd.Dir = "."
-	out, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	return string(out), nil
-}
-
-func generateSystemPrompt(basePrompt string) (string, error) {
-	projectTree, err := getProjectTree(2)
-	if err != nil {
-		return "", err
-	}
-
-	return fmt.Sprintf(
-		"%s\n\npwd:%s\nProject tree:\n%s",
-		basePrompt,
-		os.Getenv("PWD"),
-		projectTree,
-	), nil
-}
+import "golang.design/x/clipboard"
 
 func main() {
 	provider := flag.String("provider", "openrouter", "llm provider: anthropic, openai, or openrouter")
 	model := flag.String("model", "", "model name, overrides the provider default")
 	system := flag.String("system", "", "path to a system prompt file")
+	version := flag.Bool("version", false, "print version and exit")
+	debug := flag.Bool("debug", false, "enable debug logging")
 	flag.Parse()
+
+	if *version {
+		fmt.Println("Sigmoidh v0.1.0")
+		os.Exit(0)
+	}
+
+	workDir, err := os.Getwd()
+	if err != nil {
+		fatal(err)
+	}
 
 	client, defaultModel, err := newClient(*provider)
 	if err != nil {
@@ -60,10 +46,14 @@ func main() {
 		}
 		prompt = string(b)
 	}
-	prompt, err = generateSystemPrompt(prompt)
+	prompt, err = generateSystemPrompt(prompt, workDir)
+	if err != nil {
+		fatal(err)
+	}
 	fmt.Println(prompt)
 
-	smh := NewSigmoidh(client, defaultModel, prompt)
+	smh := NewSigmoidh(client, defaultModel, prompt, workDir, debug)
+	defer smh.Close()
 	ctx := context.Background()
 
 	if args := flag.Args(); len(args) > 0 {
@@ -91,12 +81,72 @@ func repl(ctx context.Context, smh *Sigmoidh, provider, model string) {
 		if line == "" {
 			continue
 		}
+
+		if strings.HasPrefix(line, "/") {
+			if err := handleSlashCommand(ctx, smh, line); err != nil {
+				fmt.Fprintln(os.Stderr, "error:", err)
+			}
+			continue
+		}
+
 		if line == "exit" || line == "quit" {
 			return
 		}
 		if err := smh.Run(ctx, line); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 		}
+	}
+}
+
+func copyToClipboard(text string) error {
+	if err := clipboard.Init(); err != nil {
+		return err
+	}
+	clipboard.Write(clipboard.FmtText, []byte(text))
+	return nil
+}
+
+func handleSlashCommand(ctx context.Context, smh *Sigmoidh, line string) error {
+	line = line[1:]
+	parts := strings.Fields(line)
+	if len(parts) == 0 {
+		return fmt.Errorf("empty command")
+	}
+	cmd := parts[0]
+	args := parts[1:]
+
+	switch cmd {
+	case "copy":
+		if len(smh.lastTexts) == 0 {
+			return fmt.Errorf("no previous responses to copy")
+		}
+
+		if len(args) == 0 {
+			return copyToClipboard(smh.lastTexts[len(smh.lastTexts)-1])
+		}
+
+		switch args[0] {
+		case "all":
+			return copyToClipboard(strings.Join(smh.lastTexts, "\n"))
+		case "last":
+			return copyToClipboard(smh.lastTexts[len(smh.lastTexts)-1])
+		case "num":
+			count := 1
+			if len(args) > 1 {
+				if n, err := strconv.Atoi(args[1]); err == nil && n > 0 {
+					count = n
+				}
+			}
+			if count > len(smh.lastTexts) {
+				count = len(smh.lastTexts)
+			}
+			start := len(smh.lastTexts) - count
+			return copyToClipboard(strings.Join(smh.lastTexts[start:], "\n"))
+		default:
+			return fmt.Errorf("usage: /copy [all|last|num <n>]")
+		}
+	default:
+		return fmt.Errorf("unknown slash command: /%s", cmd)
 	}
 }
 

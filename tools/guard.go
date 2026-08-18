@@ -1,4 +1,4 @@
-package main
+package tools
 
 import (
 	"net/http"
@@ -28,6 +28,13 @@ func isTextFile(data []byte) bool {
 		}
 	}
 	return false
+}
+
+func isWithinPath(path, root string) bool {
+	path = resolveRealPath(resolvePath(path))
+	root = resolveRealPath(resolvePath(root))
+
+	return path == root || strings.HasPrefix(path, root+string(filepath.Separator))
 }
 
 // isEnvFile matches .env and its variants (.env.local, .env.production, ...)
@@ -78,7 +85,10 @@ var shallowProtectedRoots = []string{
 
 // resolvePath expands a leading ~ and returns a cleaned absolute path.
 // filepath.Abs/Clean operate on the string without any fixed-size buffers,
-// so arbitrarily long paths are handled the same as short ones.
+// so arbitrarily long paths are handled the same as short ones. This is a
+// purely lexical operation: it never touches the filesystem, so a symlink
+// anywhere in the path is not followed here — see resolveRealPath for the
+// filesystem-aware resolution isProtectedPath actually needs.
 func resolvePath(p string) string {
 	if p == "~" || strings.HasPrefix(p, "~/") {
 		if home, err := os.UserHomeDir(); err == nil {
@@ -92,13 +102,65 @@ func resolvePath(p string) string {
 	return filepath.Clean(abs)
 }
 
+// resolveRealPath takes the lexically-cleaned absolute path from
+// resolvePath and resolves it through the filesystem so a symlink cannot be
+// used to reach a protected location under an innocuous-looking name — e.g.
+// a symlink at ~/scratch pointing to /etc must still be recognized as
+// touching /etc.
+//
+// The target of a destructive command may not exist yet (the command could
+// be about to create it, or a parent directory might exist while the leaf
+// does not), so this walks from the longest existing prefix outward:
+// filepath.EvalSymlinks is tried on the full path first, and on failure
+// (typically because some suffix doesn't exist) progressively shorter
+// prefixes are tried until one resolves or nothing is left to try. Whatever
+// suffix wasn't resolved (because it doesn't exist on disk) is reattached
+// lexically to the resolved prefix, since a nonexistent path component
+// cannot itself be a symlink.
+func resolveRealPath(cleaned string) string {
+	if cleaned == "/" {
+		return "/"
+	}
+	remainder := ""
+	cur := cleaned
+	for {
+		real, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			return filepath.Clean(real + remainder)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			// Reached "/" (or a malformed path that stopped shrinking)
+			// without ever successfully resolving anything; nothing on
+			// this path exists, so there's nothing a symlink could have
+			// redirected — fall back to the lexical form.
+			return cleaned
+		}
+		remainder = "/" + filepath.Base(cur) + remainder
+		cur = parent
+	}
+}
+
 // isProtectedPath reports whether p resolves to a system root, the user's
 // home directory, or anything nested inside one of them. Mount-point
 // directories (/mnt, /media) are protected only at the bare mount point —
 // a path one or more levels under them is an arbitrary mounted volume, not
 // part of the protected system tree, and is not flagged here.
+//
+// Resolution goes through resolveRealPath, not just resolvePath, so a
+// symlink cannot be used to reach a protected location under a path that
+// looks unprotected on its face.
+//
+// Known limitation: comparisons against protectedRoots/shallowProtectedRoots
+// are byte-exact. On a case-insensitive filesystem (a mounted FAT/exFAT/NTFS
+// volume, or certain macOS/Linux configurations), a differently-cased path
+// that the OS treats as the same location — e.g. "/ETC" vs "/etc" — will not
+// be recognized as a match here. Whether a given path's filesystem is
+// case-insensitive is a per-mount (and on some Linux filesystems, even
+// per-directory) property that isn't reliably inferable from the target OS
+// alone, so this isn't handled rather than risk an incorrect platform guess.
 func isProtectedPath(p string) bool {
-	r := resolvePath(p)
+	r := resolveRealPath(resolvePath(p))
 	if r == "/" {
 		return true
 	}
@@ -115,11 +177,41 @@ func isProtectedPath(p string) bool {
 			return true
 		}
 	}
-	if home, err := os.UserHomeDir(); err == nil && home != "" && r == home {
+	if home, err := os.UserHomeDir(); err != nil || home == "" {
+		// $HOME is unset or unreadable — home-directory protection cannot
+		// be applied for this check. This is a real gap in coverage (a
+		// destructive command against the home directory will not be
+		// caught by this branch), not merely an unused-return situation,
+		// so it is surfaced rather than silently skipped. onHomeDirUnknown
+		// is nil by default and therefore a no-op unless the embedding
+		// program wires it up; isProtectedPath's own bool-returning
+		// signature is preserved so none of its existing callers need to
+		// change to observe this.
+		if onHomeDirUnknown != nil {
+			onHomeDirUnknown(p)
+		}
+	} else if r == home {
 		return true
 	}
 	return false
 }
+
+func isProtectedCommandPath(path, workingDir string) bool {
+	// The workspace is explicitly allowed.
+	if isWithinPath(path, workingDir) {
+		return false
+	}
+
+	return isProtectedPath(path)
+}
+
+// onHomeDirUnknown, if set, is called whenever isProtectedPath cannot
+// determine the user's home directory and therefore could not check
+// whether the given path falls inside it. Left nil (the default), this is
+// a no-op — set it if the embedding program wants visibility into checks
+// that ran with degraded home-directory coverage, e.g. to log a warning
+// rather than have the gap pass unnoticed.
+var onHomeDirUnknown func(checkedPath string)
 
 type shellToken struct {
 	text   string
@@ -373,7 +465,11 @@ func isForkBomb(cmd string) bool {
 // command apart at &&, ||, ;, |, &, newlines, and subshell/substitution
 // delimiters, so a destructive command hidden inside (...), $(...), or
 // backticks is checked exactly like one at the top level.
-func destructiveCommandOnProtectedPath(cmd string) (string, bool) {
+func destructiveCommandOnProtectedPath(cmd string, cwd ...string) (string, bool) {
+	workingDir := "."
+	if len(cwd) > 0 && cwd[0] != "" {
+		workingDir = cwd[0]
+	}
 	if isForkBomb(cmd) {
 		return strings.TrimSpace(cmd), true
 	}
@@ -411,7 +507,7 @@ func destructiveCommandOnProtectedPath(cmd string) (string, bool) {
 				if strings.HasPrefix(a, "-") {
 					continue
 				}
-				if isProtectedPath(a) {
+				if isProtectedCommandPath(a, workingDir) {
 					hasProtectedPath = true
 				}
 			}
@@ -426,7 +522,7 @@ func destructiveCommandOnProtectedPath(cmd string) (string, bool) {
 			if strings.HasPrefix(a, "-") {
 				continue
 			}
-			if isProtectedPath(a) {
+			if isProtectedCommandPath(a, workingDir) {
 				blocked = true
 				break
 			}
@@ -445,4 +541,3 @@ func destructiveCommandOnProtectedPath(cmd string) (string, bool) {
 	}
 	return "", false
 }
-

@@ -17,6 +17,18 @@ const (
 	maxTokens = 4096
 )
 
+type RunStats struct {
+	TotalTurns            int
+	TotalToolCalls        int
+	TotalInputTokens      int
+	TotalOutputTokens     int
+	TotalTokens           int
+	TotalReasoningTokens  int
+	TotalCacheReadTokens  int
+	TotalCacheWriteTokens int
+	TotalCachedTokens     int
+}
+
 type Sigmoidh struct {
 	client      *litellm.Client
 	model       string
@@ -25,6 +37,7 @@ type Sigmoidh struct {
 	historyFile *os.File
 	lastTexts   []string
 	debug       bool
+	stats       *RunStats
 }
 
 type historyEntry struct {
@@ -47,13 +60,14 @@ type historyResult struct {
 	IsError   bool   `json:"is_error"`
 }
 
-func NewSigmoidh(client *litellm.Client, model, system, workDir string, debug *bool) *Sigmoidh {
+func NewSigmoidh(client *litellm.Client, model, system, workDir string, readOnlyMode *bool, debug *bool) *Sigmoidh {
 	s := &Sigmoidh{
 		client:   client,
 		model:    model,
 		workDir:  workDir,
 		messages: []litellm.Message{litellm.System(system)},
 		debug:    *debug,
+		stats:    &RunStats{},
 	}
 
 	histDir := filepath.Join(homeDir(), ".sigmoidh", "history")
@@ -67,6 +81,7 @@ func NewSigmoidh(client *litellm.Client, model, system, workDir string, debug *b
 			Content:   system,
 		})
 	}
+	agenttools.SetReadOnlyMode(*readOnlyMode)
 
 	return s
 }
@@ -75,6 +90,33 @@ func (s *Sigmoidh) Close() {
 	if s.historyFile != nil {
 		s.historyFile.Close()
 	}
+}
+func humanNumber(n int) string {
+	switch {
+	case n >= 1_000_000_000:
+		return fmt.Sprintf("%.1fB", float64(n)/1_000_000_000)
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fK", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
+func (s *Sigmoidh) PrintStats() {
+	fmt.Fprintln(os.Stderr, "\nRun Stats:")
+	fmt.Fprintf(os.Stderr, "  Total Turns: %s\n", humanNumber(s.stats.TotalTurns))
+	fmt.Fprintf(os.Stderr, "  %s Tool Calls | %s Input Tokens | %s Output Tokens | %s Total Tokens | %s Reasoning Tokens | %s Cache Read Tokens | %s Cache Write Tokens | %s Total Cached Tokens\n",
+		humanNumber(s.stats.TotalToolCalls),
+		humanNumber(s.stats.TotalInputTokens),
+		humanNumber(s.stats.TotalOutputTokens),
+		humanNumber(s.stats.TotalTokens),
+		humanNumber(s.stats.TotalReasoningTokens),
+		humanNumber(s.stats.TotalCacheReadTokens),
+		humanNumber(s.stats.TotalCacheWriteTokens),
+		humanNumber(s.stats.TotalCachedTokens),
+	)
 }
 
 func (s *Sigmoidh) writeHistory(entry historyEntry) {
@@ -107,13 +149,26 @@ func (s *Sigmoidh) Run(ctx context.Context, input string) error {
 		resp, err := s.client.Chat(ctx, litellm.Request{
 			Model:     s.model,
 			Messages:  s.messages,
-			Tools:     agenttools.Definitions(),
+			Tools:     agenttools.GetAvailableTools(),
 			MaxTokens: litellm.IntPtr(maxTokens),
 		})
 		if err != nil {
 			return err
 		}
 		s.messages = append(s.messages, litellm.Assistant(resp.Blocks...))
+		fmt.Fprintf(os.Stderr, "[TURN %d] model=%s provider=%s tokens=%d inputTokens=%d outputTokens=%d reasoningTokens=%d cachedReadTokens=%d cachedWriteTokens=%d\n",
+			turn+1, resp.Usage.Model, resp.Usage.Provider,
+			resp.Usage.TotalTokens, resp.Usage.InputTokens, resp.Usage.OutputTokens, resp.Usage.ReasoningTokens,
+			resp.Usage.CacheReadTokens, resp.Usage.CacheWriteTokens,
+		)
+
+		s.stats.TotalInputTokens += resp.Usage.InputTokens
+		s.stats.TotalOutputTokens += resp.Usage.OutputTokens
+		s.stats.TotalTokens += resp.Usage.TotalTokens
+		s.stats.TotalReasoningTokens += resp.Usage.ReasoningTokens
+		s.stats.TotalCacheReadTokens += resp.Usage.CacheReadTokens
+		s.stats.TotalCacheWriteTokens += resp.Usage.CacheWriteTokens
+		s.stats.TotalCachedTokens += resp.Usage.CacheReadTokens + resp.Usage.CacheWriteTokens
 
 		if text := resp.Reasoning(); text != "" {
 			fmt.Fprintf(os.Stderr, "[REASONING-START]\n %s\n[REASONING-END]\n\n", text)
@@ -137,6 +192,8 @@ func (s *Sigmoidh) Run(ctx context.Context, input string) error {
 			})
 		}
 		s.writeHistory(entry)
+		s.stats.TotalTurns++
+		s.stats.TotalToolCalls += len(calls)
 
 		if len(calls) == 0 {
 			if textResp != "" {

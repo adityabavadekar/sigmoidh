@@ -10,13 +10,15 @@ import (
 	"strings"
 )
 
-const defaultSystem = `You are Sigmoidh, a terminal coding and task agent.
+const defaultSystemPrompt = `You are Sigmoidh, a terminal coding and task agent.
 Help the user with programming, debugging, and technical tasks.
 Use the provided terminal tools when filesystem or command-line access is needed.
-Prefer small, verifiable steps. Be direct and very concise in your replies.
+Prefer the fewest tool calls necessary. Verify important changes, but do not repeat checks or investigate already-confirmed information.
+Be direct and concise in your replies.
 Always ask BEFORE performing destructive actions like deleting files or making irreversible changes with git.
 
 Keep reasoning terse. Do not restate the user's request or explain obvious tool choices. Do not explain obvious actions or tool choices.`
+const readOnlyModePart = `[[READ-ONLY MODE]] No write tools available. Read, search, analyze. For requested fixes, describe the exact change without applying it. Any Write/Edit operations will be rejected. Inform user you cannot edit files when needed.`
 
 const usefulBinariesPrompt = `Useful binaries available in the environment:`
 
@@ -167,7 +169,7 @@ func getGitBranch(workDir string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func generateSystemPrompt(basePrompt, workDir string) (string, error) {
+func generateSystemPrompt(basePrompt string, readOnlyMode bool, workDir string) (string, error) {
 	projectTree, err := getProjectTree(workDir, 1, 20, 30)
 	if err != nil {
 		return "", err
@@ -175,6 +177,11 @@ func generateSystemPrompt(basePrompt, workDir string) (string, error) {
 
 	var b strings.Builder
 	b.WriteString(basePrompt)
+
+	if readOnlyMode {
+		b.WriteString("\n\n")
+		b.WriteString(readOnlyModePart)
+	}
 
 	if binaries := getAvailableBinaries(); len(binaries) > 0 {
 		b.WriteString("\n\n")

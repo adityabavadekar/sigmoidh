@@ -41,4 +41,4 @@ In case modules were updated, repeat Steps 1 and 2.
 - Anthropic
 - OpenRouter
 
-Although the project uses LiteLLM module which supports most of well known providers, `providers.go` needs to be updated to handle the provider-specific calling.
+Although the project uses LiteLLM module which supports most of well known providers, `provider.go` needs to be updated to handle the provider-specific calling.

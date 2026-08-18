@@ -7,7 +7,7 @@ import (
 
 func TestScratch(t *testing.T) {
 	fmt.Println("Running TestScratch...")
-	systemPrompt, err := generateSystemPrompt(defaultSystem, ".")
+	systemPrompt, err := generateSystemPrompt(defaultSystemPrompt, false, ".")
 	if err != nil {
 		t.Fatalf("Failed to generate system prompt: %v", err)
 	}

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+
+	"github.com/voocel/litellm"
 )
 
 const (
@@ -19,6 +21,7 @@ const (
 	editErrNotFound        = `Edit failed: old_str was not found in the file. No changes were made.`
 	editErrAmbiguous       = `Edit failed: old_str matches more than once in the file. Include more surrounding context so it matches exactly one location. No changes were made.`
 	editErrEmptyOldStr     = `Edit failed: old_str is empty. Provide the exact text to replace.`
+	readOnlyModeErr        = `Refused: READ-ONLY mode is enabled. This tool is not allowed.`
 	emptyOutputStr         = `(no output)`
 )
 
@@ -86,6 +89,8 @@ type webArgs struct {
 	Query string `json:"query"`
 }
 
+var readOnlyMode bool
+
 // RunTool runs a tool by name and returns its output and whether it failed. If the output is empty, it returns a specific string indicating that there was no output.
 func RunTool(ctx context.Context, name string, raw json.RawMessage, workDir string) (string, bool) {
 	output, isErr := runToolDirect(ctx, name, raw, workDir)
@@ -95,7 +100,19 @@ func RunTool(ctx context.Context, name string, raw json.RawMessage, workDir stri
 	return output, isErr
 }
 
+func SetReadOnlyMode(readOnly bool) {
+	readOnlyMode = readOnly
+}
+
+func GetAvailableTools() []litellm.Tool {
+	return Definitions(readOnlyMode)
+}
+
 func runToolDirect(ctx context.Context, name string, raw json.RawMessage, workDir string) (string, bool) {
+	if readOnlyMode && !IsReadOnlyTool(name) {
+		return readOnlyModeErr, true
+	}
+
 	switch name {
 	case "bash":
 		var a bashArgs
@@ -180,4 +197,12 @@ func truncate(s string) string {
 		return s
 	}
 	return s[:maxOutput] + fmt.Sprintf("\n...[truncated, %d bytes total]", len(s))
+}
+
+func PrintAvailableTools() {
+	fmt.Println("Available tools:")
+	tools := GetAvailableTools()
+	for _, tool := range tools {
+		fmt.Printf("- %s: %s\n", tool.Name, tool.Description)
+	}
 }

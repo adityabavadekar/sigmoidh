@@ -122,8 +122,35 @@ var definitions = []litellm.Tool{
 	}),
 }
 
-func Definitions() []litellm.Tool {
-	return definitions
+var readOnlyTools = []string{"read", "search", "list_files", "batch_read", "web"}
+
+// For O(1) lookup of read-only tools.
+var readOnlyToolSet = func() map[string]struct{} {
+	set := make(map[string]struct{}, len(readOnlyTools))
+	for _, name := range readOnlyTools {
+		set[name] = struct{}{}
+	}
+	return set
+}()
+
+func IsReadOnlyTool(name string) bool {
+	_, ok := readOnlyToolSet[name]
+	return ok
+}
+
+func Definitions(readOnlyMode bool) []litellm.Tool {
+	if !readOnlyMode {
+		return definitions
+	}
+
+	filtered := make([]litellm.Tool, 0, len(readOnlyTools))
+	for _, tool := range definitions {
+		if _, ok := readOnlyToolSet[tool.Name]; ok {
+			filtered = append(filtered, tool)
+		}
+	}
+
+	return filtered
 }
 
 func mustTool(name, desc string, schema map[string]any) litellm.Tool {

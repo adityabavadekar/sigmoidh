@@ -12,7 +12,7 @@ func runListFiles(path string, maxResults int, workDir string) (string, bool) {
 	if path == "" {
 		root = workDir
 	}
-	realRoot, errText := resolveSearchRoot(root, workDir)
+	realRoot, _, errText := resolveSearchRoot(root, workDir)
 	if errText != "" {
 		return errText, true
 	}

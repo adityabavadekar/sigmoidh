@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	agenttools "github.com/adityabavadekar/sigmoidh/tools"
 	"os"
 	"strconv"
 	"strings"
@@ -12,16 +13,28 @@ import (
 
 import "golang.design/x/clipboard"
 
+const VERSION = "v0.3.0"
+const EXIT_MESSAGE = "Exiting Sigmoidh. Goodbye!"
+
 func main() {
 	provider := flag.String("provider", "openrouter", "llm provider: anthropic, openai, or openrouter")
 	model := flag.String("model", "", "model name, overrides the provider default")
 	system := flag.String("system", "", "path to a system prompt file")
+	oneShotPrompt := flag.String("prompt", "", "run a single prompt and exit")
+	listTools := flag.Bool("list-tools", false, "list available tools and exit")
+	readOnlyMode := flag.Bool("readonly", false, "enable read-only mode (only read tool allowed)")
 	version := flag.Bool("version", false, "print version and exit")
 	debug := flag.Bool("debug", false, "enable debug logging")
 	flag.Parse()
 
 	if *version {
-		fmt.Println("Sigmoidh v0.1.0")
+		fmt.Printf("Sigmoidh %s\n", VERSION)
+		os.Exit(0)
+	}
+
+	if *listTools {
+		agenttools.SetReadOnlyMode(*readOnlyMode)
+		agenttools.PrintAvailableTools()
 		os.Exit(0)
 	}
 
@@ -38,36 +51,43 @@ func main() {
 		defaultModel = *model
 	}
 
-	prompt := defaultSystem
+	systemPrompt := defaultSystemPrompt
 	if *system != "" {
 		b, err := os.ReadFile(*system)
 		if err != nil {
 			fatal(err)
 		}
-		prompt = string(b)
+		systemPrompt = string(b)
 	}
-	prompt, err = generateSystemPrompt(prompt, workDir)
+	systemPrompt, err = generateSystemPrompt(systemPrompt, *readOnlyMode, workDir)
 	if err != nil {
 		fatal(err)
 	}
-	fmt.Println(prompt)
+	fmt.Println(systemPrompt)
 
-	smh := NewSigmoidh(client, defaultModel, prompt, workDir, debug)
+	smh := NewSigmoidh(client, defaultModel, systemPrompt, workDir, readOnlyMode, debug)
 	defer smh.Close()
 	ctx := context.Background()
 
 	if args := flag.Args(); len(args) > 0 {
-		if err := smh.Run(ctx, strings.Join(args, " ")); err != nil {
+		*oneShotPrompt = strings.Join(args, " ")
+	}
+
+	repl(ctx, smh, *provider, defaultModel, *oneShotPrompt, readOnlyMode, debug)
+}
+
+func repl(ctx context.Context, smh *Sigmoidh, provider, model string, oneShotPrompt string, readOnlyMode, debug *bool) {
+	if oneShotPrompt != "" {
+		if err := smh.Run(ctx, oneShotPrompt); err != nil {
 			fatal(err)
 		}
 		return
 	}
 
-	repl(ctx, smh, *provider, defaultModel)
-}
-
-func repl(ctx context.Context, smh *Sigmoidh, provider, model string) {
-	fmt.Fprintf(os.Stderr, "[ OK ] Sigmoidh ready | (%s#%s) | Ctrl-D to Exit\n", provider, model)
+	fmt.Fprintf(os.Stderr, "[ OK ] Sigmoidh %s | (%s#%s) | Ctrl-D to Exit | /help for more\n", VERSION, provider, model)
+	if *readOnlyMode {
+		fmt.Fprintln(os.Stderr, "[ READ-ONLY MODE ENABLED ]")
+	}
 
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
@@ -85,17 +105,21 @@ func repl(ctx context.Context, smh *Sigmoidh, provider, model string) {
 		if strings.HasPrefix(line, "/") {
 			if err := handleSlashCommand(ctx, smh, line); err != nil {
 				fmt.Fprintln(os.Stderr, "error:", err)
+				if err.Error() == EXIT_MESSAGE {
+					break
+				}
 			}
 			continue
 		}
 
 		if line == "exit" || line == "quit" {
-			return
+			break
 		}
 		if err := smh.Run(ctx, line); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 		}
 	}
+	smh.PrintStats()
 }
 
 func copyToClipboard(text string) error {
@@ -116,6 +140,20 @@ func handleSlashCommand(ctx context.Context, smh *Sigmoidh, line string) error {
 	args := parts[1:]
 
 	switch cmd {
+	case "help":
+		fmt.Println("Available commands:")
+		fmt.Println("/help  -                    Show this help message")
+		fmt.Println("/usage -                    Show usage statistics")
+		fmt.Println("/copy [all|last|num <n>] -  Copy previous responses to clipboard")
+		fmt.Println("/exit  -                    Exit the program")
+		return nil
+
+	case "exit":
+		return fmt.Errorf(EXIT_MESSAGE)
+	case "usage":
+		fmt.Print("[ USAGE ]")
+		smh.PrintStats()
+		return nil
 	case "copy":
 		if len(smh.lastTexts) == 0 {
 			return fmt.Errorf("no previous responses to copy")

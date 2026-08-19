@@ -1,17 +1,18 @@
 package main
 
 import (
-	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	agenttools "github.com/adityabavadekar/sigmoidh/tools"
+	"github.com/chzyer/readline"
+	"golang.design/x/clipboard"
+	"io"
 	"os"
 	"strconv"
 	"strings"
 )
-
-import "golang.design/x/clipboard"
 
 const VERSION = "v0.4.0"
 const EXIT_MESSAGE = "Exiting Sigmoidh. Goodbye!"
@@ -90,16 +91,38 @@ func repl(ctx context.Context, smh *Sigmoidh, provider, model string, oneShotPro
 	}
 
 	smh.observer.OnBootstrap(VERSION, provider, model, *readOnlyMode)
-
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	rl, err := readline.NewEx(&readline.Config{
+		Prompt:          fmt.Sprintf("%s❯%s ", ansiCyan, ansiReset),
+		HistoryFile:     smh.ReplHistoryFilePath(),
+		HistoryLimit:    1000,
+		InterruptPrompt: "^C",
+		EOFPrompt:       "exit",
+	})
+	if err != nil {
+		fatal(fmt.Errorf("failed to initialize readline: %w", err))
+	}
+	defer rl.Close()
 
 	for {
 		fmt.Print("> ")
-		if !scanner.Scan() {
-			return
+		line, err := rl.Readline()
+		if err != nil {
+			if errors.Is(err, readline.ErrInterrupt) {
+				if len(line) > 0 {
+					// Ctrl+C on non-empty line -> just clear line
+					continue
+				}
+				// Ctrl+C on empty line -> exit
+				break
+			}
+			// Ctrl+D (EOF) -> exit
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			fmt.Fprintf(os.Stderr, "%s✖ Read error:%s %v\n", ansiRed, ansiReset, err)
+			break
 		}
-		line := strings.TrimSpace(scanner.Text())
+		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}

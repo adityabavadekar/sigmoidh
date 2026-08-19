@@ -61,6 +61,24 @@ type historyResult struct {
 	IsError   bool   `json:"is_error"`
 }
 
+func (s *Sigmoidh) AppDir() string {
+	return filepath.Join(homeDir(), ".sigmoidh")
+}
+
+func (s *Sigmoidh) HistoryFilePath() string {
+	histDir := filepath.Join(s.AppDir(), "history")
+	os.MkdirAll(histDir, 0o755)
+	fname := filepath.Join(histDir, time.Now().Format("2001-01-02_15-04-05")+".jsonl")
+	return fname
+}
+
+func (s *Sigmoidh) ReplHistoryFilePath() string {
+	histDir := filepath.Join(s.AppDir(), "repl_history")
+	os.MkdirAll(histDir, 0o755)
+	fname := filepath.Join(histDir, ".repl_history")
+	return fname
+}
+
 func NewSigmoidh(client *litellm.Client, model, system, workDir string, observer AgentObserver, readOnlyMode *bool, debug *bool) *Sigmoidh {
 	s := &Sigmoidh{
 		client:   client,
@@ -72,9 +90,7 @@ func NewSigmoidh(client *litellm.Client, model, system, workDir string, observer
 		stats:    &RunStats{},
 	}
 
-	histDir := filepath.Join(homeDir(), ".sigmoidh", "history")
-	os.MkdirAll(histDir, 0o755)
-	fname := filepath.Join(histDir, time.Now().Format("2001-01-02_15-04-05")+".jsonl")
+	fname := s.HistoryFilePath()
 	if f, err := os.OpenFile(fname, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
 		s.historyFile = f
 		s.writeHistory(historyEntry{

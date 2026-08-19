@@ -119,6 +119,7 @@ func (l *TerminalLogger) OnAssistantText(text string) {
 
 func (l *TerminalLogger) OnRunComplete(stats *RunStats) {
 	l.PrintSummaryLine(stats)
+	fmt.Fprintf(os.Stderr, "%sGoodbye!%s\n", ansiDim, ansiReset)
 }
 
 func (l *TerminalLogger) OnPrintUsageStats(stats *RunStats) {

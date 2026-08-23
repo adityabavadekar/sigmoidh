@@ -40,7 +40,13 @@ func startExecSession(command string, yieldTimeMS int, workDir string) (string, 
 		return refusalBashDestructive, true
 	}
 
-	cmd := exec.Command("bwrap", bashSandboxArgs(command, workDir)...)
+	var cmd *exec.Cmd
+	if sandboxEnabled {
+		cmd = exec.Command("bwrap", bashSandboxArgs(command, workDir)...)
+	} else {
+		cmd = exec.Command("sh", "-c", command)
+		cmd.Dir = workDir
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err.Error(), true
@@ -153,4 +159,35 @@ func yieldDuration(ms int) time.Duration {
 		ms = maxYieldMS
 	}
 	return time.Duration(ms) * time.Millisecond
+}
+
+// NotifyOnExecSessionDone runs fn once when the session's process exits (or
+// the session disappears). Returns false if no such session exists.
+func NotifyOnExecSessionDone(id int, fn func(err error)) bool {
+	execSessions.Lock()
+	s, ok := execSessions.byID[id]
+	execSessions.Unlock()
+	if !ok {
+		return false
+	}
+	go func() {
+		for {
+			time.Sleep(300 * time.Millisecond)
+			s.mu.Lock()
+			done, e := s.done, s.err
+			s.mu.Unlock()
+			if done {
+				fn(e)
+				return
+			}
+			execSessions.Lock()
+			_, exists := execSessions.byID[id]
+			execSessions.Unlock()
+			if !exists {
+				fn(nil)
+				return
+			}
+		}
+	}()
+	return true
 }

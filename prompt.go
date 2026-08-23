@@ -10,17 +10,14 @@ import (
 	"strings"
 )
 
-const defaultSystemPrompt = `You are Sigmoidh, a terminal coding and task agent.
-Help the user with programming, debugging, and technical tasks.
-Use the provided terminal tools when filesystem or command-line access is needed.
-Prefer the fewest tool calls necessary. Verify important changes, but do not repeat checks or investigate already-confirmed information.
-Be direct and concise in your replies.
-Always ask BEFORE performing destructive actions like deleting files or making irreversible changes with git.
-
-Keep reasoning terse. Do not restate the user's request or explain obvious tool choices. Do not explain obvious actions or tool choices.`
+// Kept deliberately short: it is the cached prefix for every request in the
+// session, so every line must earn its tokens. Dynamic context (binaries,
+// branch, tree) is appended AFTER this static block so the shared prefix
+// stays stable across projects.
+const defaultSystemPrompt = `You are Sigmoidh, a terminal coding agent. Use tools for anything needing filesystem or shell access; fewest calls possible. Verify changes once; never repeat confirmed checks. Reply direct and concise: no filler, no restating requests, no narrating obvious steps. Keep reasoning terse. Ask before destructive or irreversible actions (deletions, resets, force-push). Environment facts below are current: trust them without re-checking. Listed binaries are confirmed present; unlisted tools may still exist, so check once only when a task needs one.`
 const readOnlyModePart = `[[READ-ONLY MODE]] No write tools available. Read, search, analyze. For requested fixes, describe the exact change without applying it. Any Write/Edit operations will be rejected. Inform user you cannot edit files when needed.`
 
-const usefulBinariesPrompt = `Useful binaries available in the environment:`
+const usefulBinariesPrompt = `Confirmed available binaries (others may also exist):`
 
 type dirInfo struct {
 	path       string
@@ -177,6 +174,12 @@ func generateSystemPrompt(basePrompt string, readOnlyMode bool, workDir string) 
 
 	var b strings.Builder
 	b.WriteString(basePrompt)
+
+	b.WriteString("\n\nMemory (plain markdown, edit with your file tools): project notes in ")
+	b.WriteString(projectMemoryPath(workDir))
+	b.WriteString(", personal/global notes in ")
+	b.WriteString(memoryFilePath())
+	b.WriteString(".")
 
 	if readOnlyMode {
 		b.WriteString("\n\n")

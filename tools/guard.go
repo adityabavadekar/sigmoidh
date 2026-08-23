@@ -113,10 +113,38 @@ func resolveRealPath(cleaned string) string {
 	}
 }
 
+// allowedPaths are absolute, resolved paths exempt from protection (e.g. the
+// host's persistent memory note). Exact matches only — never directories.
+var allowedPaths []string
+
+// SetAllowedPaths registers exact file paths that file tools may access even
+// though they resolve under a protected root.
+func SetAllowedPaths(paths ...string) {
+	allowedPaths = allowedPaths[:0]
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		allowedPaths = append(allowedPaths, resolveRealPath(filepath.Clean(p)))
+	}
+}
+
+func isAllowedPath(r string) bool {
+	for _, a := range allowedPaths {
+		if r == a {
+			return true
+		}
+	}
+	return false
+}
+
 // isProtectedPath reports whether p resolves to a system root, the user's
 // home directory, or anything nested inside one of them.
 func isProtectedPath(p string) bool {
 	r := resolveRealPath(resolvePath(p))
+	if isAllowedPath(r) {
+		return false
+	}
 	if r == "/" {
 		return true
 	}

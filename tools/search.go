@@ -22,6 +22,18 @@ const (
 	maxScannerBuf  = 512 * 1024       // 512KB max line buffer
 )
 
+// defaultSkipDirs are directories that are never worth enumerating or
+// searching (vendored deps, VCS internals, caches).
+var defaultSkipDirs = map[string]bool{
+	".git":         true,
+	"node_modules": true,
+	".pnpm-store":  true,
+	".venv":        true,
+	"__pycache__":  true,
+	".hg":          true,
+	".svn":         true,
+}
+
 var defaultIgnoredDirs = map[string]bool{
 	".git":         true,
 	"node_modules": true,

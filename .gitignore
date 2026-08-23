@@ -1,1 +1,5 @@
 sigmoidh
+.env
+.pnpm-store/
+node_modules/
+website/dist/

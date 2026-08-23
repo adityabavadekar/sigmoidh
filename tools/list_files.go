@@ -63,7 +63,10 @@ func runListFiles(path string, maxResults int, workDir string) (string, bool) {
 
 func shouldSkipListEntry(path string, d fs.DirEntry) bool {
 	base := d.Name()
-	return base == ".git" || isSensitiveFile(path)
+	if defaultSkipDirs[base] {
+		return true
+	}
+	return isSensitiveFile(path)
 }
 
 type stopWalkError struct{}

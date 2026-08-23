@@ -44,3 +44,9 @@ In case modules were updated, repeat Steps 1 and 2.
 Although the project uses LiteLLM module which supports most of well known providers, `provider.go` needs to be updated to handle the provider-specific calling.
 
 You can also use `task` tool.
+
+> **Dogfooding note:** the Minecraft-themed website in [`website/`](website/) was itself built by Sigmoidh running the `ox-alpha` model via OpenRouter. The agent dug, the model decided, the blocks placed themselves.
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).

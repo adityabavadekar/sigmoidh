@@ -4,9 +4,13 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strings"
 )
 
 func runBash(ctx context.Context, command string, workDir string) (string, bool) {
+	if strings.TrimSpace(command) == "" {
+		return "Refused: empty command. Provide the shell command to run.", true
+	}
 	if _, blocked := destructiveCommandOnProtectedPath(command, workDir); blocked {
 		return refusalBashDestructive, true
 	}
@@ -14,7 +18,13 @@ func runBash(ctx context.Context, command string, workDir string) (string, bool)
 	ctx, cancel := context.WithTimeout(ctx, bashTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "bwrap", bashSandboxArgs(command, workDir)...)
+	var cmd *exec.Cmd
+	if sandboxEnabled {
+		cmd = exec.CommandContext(ctx, "bwrap", bashSandboxArgs(command, workDir)...)
+	} else {
+		cmd = exec.CommandContext(ctx, "sh", "-c", command)
+		cmd.Dir = workDir
+	}
 	out, err := cmd.CombinedOutput()
 	text := truncate(string(out))
 
@@ -25,6 +35,15 @@ func runBash(ctx context.Context, command string, workDir string) (string, bool)
 		return text + fmt.Sprintf("\n[%v]", err), true
 	}
 	return text, false
+}
+
+// sandboxBinds are extra read-only host paths exposed inside the sandbox
+// (e.g. the spill directory, so the model can follow output pointers).
+var sandboxBinds []string
+
+// SetSandboxBinds registers additional read-only binds for bash/exec.
+func SetSandboxBinds(paths ...string) {
+	sandboxBinds = append(sandboxBinds[:0], paths...)
 }
 
 func bashSandboxArgs(command, workDir string) []string {
@@ -43,7 +62,11 @@ func bashSandboxArgs(command, workDir string) []string {
 
 		"--bind", workDir, workDir,
 		"--chdir", workDir,
-
+	}
+	for _, p := range sandboxBinds {
+		args = append(args, "--ro-bind", p, p)
+	}
+	args = append(args,
 		"--unshare-user",
 		"--unshare-pid",
 		"--unshare-uts",
@@ -57,6 +80,6 @@ func bashSandboxArgs(command, workDir string) []string {
 		"--cap-drop", "ALL",
 		"--",
 		"sh", "-c", command,
-	}
+	)
 	return args
 }

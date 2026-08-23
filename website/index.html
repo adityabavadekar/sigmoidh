@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sigmoidh — Mine Your Codebase</title>
+  <meta name="description" content="Sigmoidh is a terminal coding agent in Go. 17 tools, 3 providers, a full TUI, one binary. It digs into your codebase and ships." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet" />
+</head>
+<body data-strata="sky">
+
+  <div class="hud">
+    <div class="xp-wrap" aria-hidden="true">
+      <div id="xp-level">0</div>
+      <div class="xp-bar"><div id="xp-fill"></div></div>
+    </div>
+    <nav class="hotbar" aria-label="Sections"></nav>
+    <div id="depth-meter" aria-hidden="true">Y = 203</div>
+  </div>
+
+  <canvas id="fx" aria-hidden="true"></canvas>
+
+  <header class="hero" id="home" data-strata="sky" data-section="Home" data-icon="grass">
+    <canvas id="clouds" aria-hidden="true"></canvas>
+    <div class="sun" aria-hidden="true"></div>
+
+    <div class="hero-inner">
+      <div class="cube-wrap" title="Do not punch the cube. (Punch the cube.)">
+        <div class="cube" id="cube">
+          <div class="face f-top"></div><div class="face f-bottom"></div>
+          <div class="face f-front"></div><div class="face f-back"></div>
+          <div class="face f-left"></div><div class="face f-right"></div>
+        </div>
+        <div class="cube-shadow"></div>
+      </div>
+
+      <p class="kicker">// a terminal coding agent, written in Go</p>
+      <h1>SIGMOIDH<span class="cursor-block"></span></h1>
+      <span id="splash">Also try Minecraft!</span>
+      <p class="tagline">Point it at your repo. It digs through files, runs commands, patches code — while you watch from the surface.</p>
+
+      <div class="btn-row">
+        <a class="mc-btn green" href="#install">GET STARTED</a>
+        <a class="mc-btn" href="https://github.com/adityabavadekar/sigmoidh" target="_blank" rel="noopener">GITHUB</a>
+      </div>
+
+      <ul class="stat-strip">
+        <li>17 tools</li><li>3 providers</li><li>&infin; sessions</li><li>1 binary</li>
+      </ul>
+    </div>
+  </header>
+
+  <div class="strata surface" aria-hidden="true"></div>
+
+  <section class="dirt section" id="tools" data-strata="dirt" data-section="Tools" data-icon="chest" data-ores="">
+    <div class="wrap">
+      <h2>THE INVENTORY</h2>
+      <p class="sub">Every tool it can reach for mid-conversation. Hover an item for the lore.</p>
+      <div class="panel inventory-panel">
+        <div class="inventory" id="inventory"></div>
+      </div>
+      <p class="fineprint">Guards included: dangerous shell commands, secret files and binary blobs are refused before they happen.</p>
+    </div>
+  </section>
+
+  <div class="strata stone-line" aria-hidden="true"></div>
+
+  <section class="stone section" id="demo" data-strata="stone" data-section="Demo" data-icon="cmd" data-ores="coal iron redstone">
+    <div class="wrap">
+      <h2>WATCH IT DIG</h2>
+      <p class="sub">One prompt in, working patch out. Replayed live.</p>
+
+      <div class="term">
+        <div class="term-bar">
+          <span class="sq s1"></span><span class="sq s2"></span><span class="sq s3"></span>
+          <span class="term-title">session: repl_history — 80×24</span>
+        </div>
+        <div class="term-body" id="term-body" aria-live="polite"></div>
+      </div>
+
+      <button class="mc-btn small" id="replay">&#8635; REPLAY RUN</button>
+    </div>
+  </section>
+
+  <div class="strata deepslate-line" aria-hidden="true"></div>
+
+  <section class="deepslate section" id="install" data-strata="deepslate" data-section="Install" data-icon="pickaxe" data-ores="diamond gold">
+    <div class="wrap">
+      <h2>MINE YOUR OWN</h2>
+      <p class="sub">The crafting recipe. Three command blocks, no furnace needed.</p>
+
+      <div class="cmdblocks">
+        <div class="cmdblock impulse">
+          <span class="cb-label">IMPULSE COMMAND BLOCK</span>
+          <code>git clone https://github.com/adityabavadekar/sigmoidh<br>cd sigmoidh</code>
+          <button class="copy mc-btn tiny" data-copy="git clone https://github.com/adityabavadekar/sigmoidh&#10;cd sigmoidh">[ COPY ]</button>
+        </div>
+        <div class="cmdblock chain">
+          <span class="cb-label">CHAIN COMMAND BLOCK</span>
+          <code>go mod tidy &amp;&amp; go build -o sigmoidh .</code>
+          <button class="copy mc-btn tiny" data-copy="go mod tidy && go build -o sigmoidh .">[ COPY ]</button>
+        </div>
+        <div class="cmdblock repeat">
+          <span class="cb-label">REPEATING COMMAND BLOCK</span>
+          <code>export API_KEY=sk-...<br>./sigmoidh --provider openrouter</code>
+          <button class="copy mc-btn tiny" data-copy="export API_KEY=sk-...">[ COPY ]</button>
+        </div>
+      </div>
+
+      <p class="fineprint">Also speaks <code>-tui</code> (full-screen interface), <code>-prompt "one shot"</code>, <code>-readonly</code>, <code>-continue</code>, <code>-import opencode|claude</code>, and eval harnesses. See <code>-help</code>.</p>
+    </div>
+  </section>
+
+  <div class="strata bedrock-line" aria-hidden="true"></div>
+
+  <section class="bedrock section" id="providers" data-strata="bedrock" data-section="Bottom" data-icon="bedrock">
+    <div class="wrap">
+      <h2>VILLAGER TRADES</h2>
+      <p class="sub">Bring almost any model — LiteLLM sits under the hood.</p>
+
+      <div class="signs">
+        <div class="sign">
+          <div class="board">
+            <strong>OpenAI</strong>
+            <em>flag: openai</em>
+          </div>
+          <i class="post"></i><i class="post p2"></i>
+        </div>
+        <div class="sign">
+          <div class="board">
+            <strong>Anthropic</strong>
+            <em>flag: anthropic</em>
+          </div>
+          <i class="post"></i><i class="post p2"></i>
+        </div>
+        <div class="sign">
+          <div class="board">
+            <strong>OpenRouter</strong>
+            <em>flag: openrouter</em>
+          </div>
+          <i class="post"></i><i class="post p2"></i>
+        </div>
+      </div>
+
+      <footer>
+        <div class="hearts" id="hearts" aria-hidden="true"></div>
+        <p class="credit">Enchanted Book · <span class="glint">This website was itself built by Sigmoidh</span><br>running the <b>ox-alpha</b> model via OpenRouter. Recursion achieved.</p>
+        <p>v0.5.0 · Apache-2.0 · built with Go, blocks and zero GUIs</p>
+        <p class="legal">Not affiliated with Mojang or Microsoft. No creepers were harmed.</p>
+      </footer>
+    </div>
+  </section>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

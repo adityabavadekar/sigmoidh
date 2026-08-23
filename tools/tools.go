@@ -56,6 +56,7 @@ type searchArgs struct {
 
 type listFilesArgs struct {
 	Path       string `json:"path"`
+	Pattern    string `json:"pattern"`
 	MaxResults int    `json:"max_results"`
 }
 
@@ -89,13 +90,46 @@ type webArgs struct {
 	Query string `json:"query"`
 }
 
-var readOnlyMode bool
+var (
+	readOnlyMode   bool
+	sandboxEnabled = true // bwrap isolation for bash/exec; toggled via SetSandboxEnabled
+)
+
+// SetSandboxEnabled turns the bubblewrap jail on/off for bash and exec.
+// Disabling is a deliberate trust decision: guards (destructive-command and
+// path checks) still apply, but the process runs with full host access.
+func SetSandboxEnabled(enabled bool) {
+	sandboxEnabled = enabled
+}
+
+func SandboxEnabled() bool { return sandboxEnabled }
+
+// externalHandlers lets the host application supply tool implementations that
+// live outside this package (e.g. a sub-agent runner needing the LLM client).
+// They bypass the read-only gate: the host decides their policy.
+var externalHandlers = map[string]func(ctx context.Context, raw json.RawMessage, workDir string) (string, bool){}
+
+// RegisterExternalHandler wires an out-of-package tool implementation.
+func RegisterExternalHandler(name string, fn func(ctx context.Context, raw json.RawMessage, workDir string) (string, bool)) {
+	externalHandlers[name] = fn
+}
+
+var spillFn func(toolName, output string) string
+
+// SetSpillHandler registers a host callback that persists oversized outputs
+// (returning a preview + file reference). Nil disables spilling.
+func SetSpillHandler(fn func(toolName, output string) string) { spillFn = fn }
+
+const SpillThresholdChars = 8000
 
 // RunTool runs a tool by name and returns its output and whether it failed. If the output is empty, it returns a specific string indicating that there was no output.
 func RunTool(ctx context.Context, name string, raw json.RawMessage, workDir string) (string, bool) {
 	output, isErr := runToolDirect(ctx, name, raw, workDir)
 	if output == "" {
 		output = emptyOutputStr
+	}
+	if !isErr && len(output) > SpillThresholdChars && spillFn != nil {
+		output = spillFn(name, output)
 	}
 	return output, isErr
 }
@@ -109,6 +143,10 @@ func GetAvailableTools() []litellm.Tool {
 }
 
 func runToolDirect(ctx context.Context, name string, raw json.RawMessage, workDir string) (string, bool) {
+	if fn, ok := externalHandlers[name]; ok {
+		return fn(ctx, raw, workDir)
+	}
+
 	if readOnlyMode && !IsReadOnlyTool(name) {
 		return readOnlyModeErr, true
 	}
@@ -148,6 +186,9 @@ func runToolDirect(ctx context.Context, name string, raw json.RawMessage, workDi
 		var a listFilesArgs
 		if err := json.Unmarshal(raw, &a); err != nil {
 			return err.Error(), true
+		}
+		if a.Pattern != "" {
+			return runGlob(a.Pattern, a.Path, a.MaxResults, workDir)
 		}
 		return runListFiles(a.Path, a.MaxResults, workDir)
 	case "batch_read":
@@ -199,10 +240,24 @@ func truncate(s string) string {
 	return s[:maxOutput] + fmt.Sprintf("\n...[truncated, %d bytes total]", len(s))
 }
 
+// externalDescriptions lets the host describe handler-based tools for -list-tools.
+var externalDescriptions = map[string]string{
+	"subagent":       "Spawn a focused sub-agent that completes one task autonomously and returns its report.",
+	"trigger":        "Schedule a desktop notification (run_complete / command_done events).",
+	"memory":         "Session working memory: terse key/value scratchpad across turns.",
+	"plan":           "Task checklist with statuses; keep exactly one item in_progress.",
+	"ask_user":       "Ask the user a blocking clarifying question, then end turn.",
+	"session_search": "Full-text search across all past session transcripts.",
+}
+
 func PrintAvailableTools() {
 	fmt.Println("Available tools:")
 	tools := GetAvailableTools()
 	for _, tool := range tools {
-		fmt.Printf("- %s: %s\n", tool.Name, tool.Description)
+		desc := tool.Description
+		if d, ok := externalDescriptions[tool.Name]; ok && d != "" {
+			desc = d
+		}
+		fmt.Printf("- %s: %s\n", tool.Name, desc)
 	}
 }

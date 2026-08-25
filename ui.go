@@ -38,3 +38,23 @@ func NewUi(w io.Writer, debug bool) AgentObserver {
 }
 
 var _ AgentObserver = (*TerminalLogger)(nil)
+
+// StreamUsageObserver is optional: observers that implement it receive
+// mid-stream usage events (input tokens at message_start, cumulative output
+// while generating) so token counters can tick live instead of only after a
+// turn completes.
+type StreamUsageObserver interface {
+	OnStreamUsage(usage litellm.Usage)
+}
+
+// notifyStreamUsage fans one mid-stream usage event out to the observer when
+// it opts in; plain observers simply never see partial usage.
+func notifyStreamUsage(o AgentObserver, usage litellm.Usage) {
+	if so, ok := o.(StreamUsageObserver); ok {
+		so.OnStreamUsage(usage)
+		return
+	}
+	if mo, ok := o.(*multiObserver); ok {
+		mo.each(func(sub AgentObserver) { notifyStreamUsage(sub, usage) })
+	}
+}

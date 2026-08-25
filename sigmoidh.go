@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -140,6 +141,7 @@ func NewSigmoidh(client *litellm.Client, model, system, workDir string, observer
 		debug:    *debug,
 		stats:    &RunStats{},
 		memory:   newMemoryStore(),
+		plan:     newPlanStore(),
 		scrub:    &thinkScrubber{},
 		budget:   newIterationBudget(maxTurns),
 	}
@@ -211,9 +213,12 @@ func (s *Sigmoidh) writeHistory(entry historyEntry) {
 func (s *Sigmoidh) writeRawHistory(entry historyEntry) {
 	data, err := json.Marshal(entry)
 	if err != nil {
+		logError("history marshal failed", "role", entry.Role, "err", err)
 		return
 	}
-	s.historyFile.Write(append(data, '\n'))
+	if _, err := s.historyFile.Write(append(data, '\n')); err != nil {
+		logError("history write failed", "path", s.histPath, "err", err)
+	}
 }
 
 func homeDir() string {
@@ -245,9 +250,38 @@ func (s *Sigmoidh) Run(ctx context.Context, input string) error {
 	return s.run(ctx, input, maxTurns)
 }
 
-func (s *Sigmoidh) run(ctx context.Context, input string, maxTurns int) error {
+// runToolSafe executes one tool call, converting a panic inside the tool (or
+// anything it spawns) into an error result instead of taking the process down:
+// tool goroutines are outside the reach of the TUI's recover.
+func (s *Sigmoidh) runToolSafe(ctx context.Context, name string, args json.RawMessage) (out string, isErr bool, panicErr error) {
+	defer func() {
+		if r := recover(); r != nil {
+			logPanic("tool:"+name, r, debugStack())
+			panicErr = fmt.Errorf("%v", r)
+		}
+	}()
+	out, isErr = agenttools.RunTool(ctx, name, args, s.workDir)
+	return out, isErr, nil
+}
+
+// debugStack captures the current goroutine stack for panic logs.
+func debugStack() []byte {
+	buf := make([]byte, 8192)
+	n := runtime.Stack(buf, false)
+	return buf[:n]
+}
+
+func (s *Sigmoidh) run(ctx context.Context, input string, maxTurns int) (err error) {
 	runStart := time.Now()
 	defer func() { s.stats.TotalDuration += time.Since(runStart) }()
+	defer func() {
+		if r := recover(); r != nil {
+			logPanic("run", r, debugStack())
+			panic(r)
+		}
+	}()
+	logInfo("run start", "input_chars", len(input), "turns_max", maxTurns)
+	defer func() { logInfo("run end", "err", errString(err), "took_ms", time.Since(runStart).Milliseconds()) }()
 
 	s.messages = append(s.messages, litellm.UserText(input))
 	s.writeHistory(historyEntry{
@@ -261,9 +295,10 @@ func (s *Sigmoidh) run(ctx context.Context, input string, maxTurns int) error {
 	identicalStreak := 0
 
 	for turn := 0; turn < maxTurns; turn++ {
-		resp, err := s.streamTurn(ctx)
-		if err != nil {
-			return err
+		resp, streamErr := s.streamTurn(ctx)
+		if streamErr != nil {
+			logWarn("run ended with stream error", "turn", turn+1, "err", streamErr)
+			return streamErr
 		}
 
 		s.messages = append(s.messages, litellm.Assistant(resp.Blocks...))
@@ -300,6 +335,9 @@ func (s *Sigmoidh) run(ctx context.Context, input string, maxTurns int) error {
 		}
 		s.writeHistory(entry)
 		s.stats.TotalToolCalls += len(calls)
+		logInfo("turn complete", "turn", s.stats.TotalTurns, "tools", len(calls),
+			"in", usage.InputTokens, "out", usage.OutputTokens, "reasoning", usage.ReasoningTokens,
+			"finish", finishLabel(resp))
 
 		results := make([]litellm.Block, len(calls))
 		resultEntries := make([]historyResult, len(calls))
@@ -318,7 +356,11 @@ func (s *Sigmoidh) run(ctx context.Context, input string, maxTurns int) error {
 				sem <- struct{}{}
 				defer func() { <-sem }()
 				start := time.Now()
-				out, isErr := agenttools.RunTool(ctx, call.Name, call.Arguments, s.workDir)
+				out, isErr, perr := s.runToolSafe(ctx, call.Name, call.Arguments)
+				if perr != nil {
+					logError("tool panicked", "tool", call.Name, "err", perr)
+					out, isErr = fmt.Sprintf("tool %q crashed internally: %v", call.Name, perr), true
+				}
 				if out == "" && !isErr {
 					out = "(no output)"
 				}
@@ -329,6 +371,8 @@ func (s *Sigmoidh) run(ctx context.Context, input string, maxTurns int) error {
 
 		for i, call := range calls {
 			s.observer.OnToolResult(call.Name, outcomes[i].out, outcomes[i].isErr, outcomes[i].took)
+			logInfo("tool result", "tool", call.Name, "is_err", outcomes[i].isErr,
+				"took_ms", outcomes[i].took.Milliseconds(), "out_chars", len(outcomes[i].out))
 			results[i] = litellm.ToolResultBlock{
 				ToolUseID: call.ID,
 				Content:   []litellm.Block{litellm.Text(outcomes[i].out)},
@@ -394,6 +438,14 @@ func (s *Sigmoidh) run(ctx context.Context, input string, maxTurns int) error {
 	return fmt.Errorf("stopped after %d turns", maxTurns)
 }
 
+// errString renders a nil-safe error for logs.
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
 const (
 	retriesPerProvider = 3
 	retryBaseDelay     = 1 * time.Second
@@ -425,6 +477,8 @@ func (s *Sigmoidh) streamTurn(ctx context.Context) (*litellm.Response, error) {
 		if s.attemptsOnProvider < retriesPerProvider {
 			s.attemptsOnProvider++
 			delay := retryDelay(s.attemptsOnProvider)
+			logWarn("transient provider error, retrying", "provider", cur.Name, "attempt",
+				s.attemptsOnProvider, "delay_ms", delay.Milliseconds(), "err", err)
 			s.observer.OnRetryWait(cur.Name, s.attemptsOnProvider, delay)
 			select {
 			case <-ctx.Done():
@@ -438,6 +492,7 @@ func (s *Sigmoidh) streamTurn(ctx context.Context) (*litellm.Response, error) {
 		}
 		s.providerIndex++
 		next := s.providers[s.providerIndex]
+		logWarn("provider exhausted, falling back", "from", cur.Name, "to", next.Name, "model", next.Model, "last_err", err)
 		s.client = next.Client
 		s.model = next.Model
 		s.attemptsOnProvider = 0
@@ -503,27 +558,38 @@ func (s *Sigmoidh) tryStreamTurn(ctx context.Context) (resp *litellm.Response, t
 	}
 	textStarted := false
 
-	resp, herr := litellm.HandleWith(stream, litellm.StreamHandler{
-		Reasoning: func(delta string) error {
-			if !thinkingOpen {
-				thinkingOpen = true
-				thinkingStart = time.Now()
-				s.observer.OnThinkingStart()
+	resp, herr := litellm.Handle(stream, func(event litellm.Event) error {
+		switch e := event.(type) {
+		case litellm.ContentDelta:
+			if e.Text == "" {
+				return nil
 			}
-			s.streamTainted = true
-			s.observer.OnReasoningDelta(delta)
-			return nil
-		},
-		Content: func(delta string) error {
 			closeThinking()
 			if !textStarted {
 				textStarted = true
 				s.observer.OnAssistantTextStart()
 			}
 			s.streamTainted = true
-			s.observer.OnAssistantDelta(delta)
-			return nil
-		},
+			s.observer.OnAssistantDelta(e.Text)
+		case litellm.ReasoningDelta:
+			if e.Text == "" {
+				return nil
+			}
+			if !thinkingOpen {
+				thinkingOpen = true
+				thinkingStart = time.Now()
+				s.observer.OnThinkingStart()
+			}
+			s.streamTainted = true
+			s.observer.OnReasoningDelta(e.Text)
+		case litellm.UsageEvent:
+			// mid-stream usage (Anthropic: input at message_start, output
+			// deltas on message_delta) drives the live token counter.
+			logDebug("stream usage", "in", e.Usage.InputTokens, "out", e.Usage.OutputTokens,
+				"total", e.Usage.TotalTokens)
+			notifyStreamUsage(s.observer, e.Usage)
+		}
+		return nil
 	})
 
 	closeErr := stream.Close()

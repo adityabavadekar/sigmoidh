@@ -285,6 +285,12 @@ func resolveSessionArg(dir, cwd, arg string) (string, error) {
 
 // loadSessionMessages rebuilds provider messages from a transcript file.
 // The stored system entry is skipped: a fresh system prompt is always used.
+//
+// Transcripts written by a crashed process may contain assistant tool calls
+// that never got a result entry (the crash happened mid-turn). Providers
+// reject such histories ("user message follows unresolved tool use"), which
+// used to brick resumption of those sessions forever. Here any unresolved
+// call gets a synthetic error result inserted, so damaged sessions load.
 func loadSessionMessages(path string) ([]litellm.Message, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -293,6 +299,27 @@ func loadSessionMessages(path string) ([]litellm.Message, error) {
 	defer f.Close()
 
 	var msgs []litellm.Message
+	pending := map[string]bool{} // tool_use ids awaiting a result entry
+	repairs := 0
+
+	flushPending := func() {
+		if len(pending) == 0 {
+			return
+		}
+		blocks := make([]litellm.Block, 0, len(pending))
+		for id := range pending {
+			blocks = append(blocks, litellm.ToolResultBlock{
+				ToolUseID: id,
+				Content:   []litellm.Block{litellm.Text("no result recorded — the agent was interrupted before this tool ran")},
+				IsError:   true,
+			})
+			repairs++
+		}
+		msgs = append(msgs, litellm.Message{Role: litellm.RoleTool, Blocks: blocks})
+		logWarn("repaired unresolved tool uses in transcript", "path", filepath.Base(path), "count", len(pending))
+		pending = map[string]bool{}
+	}
+
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	for sc.Scan() {
@@ -308,6 +335,7 @@ func loadSessionMessages(path string) ([]litellm.Message, error) {
 		case "system":
 			continue
 		case "user":
+			flushPending()
 			msgs = append(msgs, litellm.UserText(e.Content))
 		case "assistant":
 			var blocks []litellm.Block
@@ -319,6 +347,7 @@ func loadSessionMessages(path string) ([]litellm.Message, error) {
 			}
 			for _, tc := range e.ToolCalls {
 				blocks = append(blocks, litellm.ToolUseBlock{ID: tc.ID, Name: tc.Name, Arguments: tc.Args})
+				pending[tc.ID] = true
 			}
 			if len(blocks) > 0 {
 				msgs = append(msgs, litellm.Assistant(blocks...))
@@ -326,6 +355,7 @@ func loadSessionMessages(path string) ([]litellm.Message, error) {
 		case "tool":
 			blocks := make([]litellm.Block, 0, len(e.Results))
 			for _, r := range e.Results {
+				delete(pending, r.ToolUseID)
 				blocks = append(blocks, litellm.ToolResultBlock{
 					ToolUseID: r.ToolUseID,
 					Content:   []litellm.Block{litellm.Text(r.Output)},
@@ -337,11 +367,16 @@ func loadSessionMessages(path string) ([]litellm.Message, error) {
 			}
 		}
 	}
+	flushPending() // transcript ends mid-turn: resolve trailing calls too
+
 	if err := sc.Err(); err != nil {
 		return nil, err
 	}
 	if len(msgs) == 0 {
 		return nil, fmt.Errorf("no resumable messages in %s", filepath.Base(path))
+	}
+	if repairs > 0 {
+		logInfo("transcript repaired on load", "path", filepath.Base(path), "synthesized_results", repairs)
 	}
 	return msgs, nil
 }
@@ -353,6 +388,7 @@ func (s *Sigmoidh) ResumeFrom(path string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	logInfo("resuming session", "path", filepath.Base(path), "messages", len(msgs))
 
 	s.messages = append(s.messages[:1], msgs...) // keep fresh system prompt at [0]
 

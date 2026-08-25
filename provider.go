@@ -71,13 +71,16 @@ func buildClient(provider string) (*litellm.Client, string, error) {
 	}
 	switch provider {
 	case "anthropic":
-		client, err := anthropic.NewClient(anthropic.Config{APIKey: key, Retry: retryPolicy})
+		client, err := anthropic.NewClient(anthropic.Config{APIKey: key, Retry: retryPolicy},
+			litellm.WithMessageRepair(litellm.RepairAll))
 		return client, defaultAnthropicModel, err
 	case "openai":
-		client, err := openai.NewClient(openai.Config{APIKey: key, Retry: retryPolicy})
+		client, err := openai.NewClient(openai.Config{APIKey: key, Retry: retryPolicy},
+			litellm.WithMessageRepair(litellm.RepairAll))
 		return client, defaultOpenAIModel, err
 	case "openrouter":
-		client, err := openrouter.NewClient(openrouter.Config{APIKey: key, Retry: retryPolicy})
+		client, err := openrouter.NewClient(openrouter.Config{APIKey: key, Retry: retryPolicy},
+			litellm.WithMessageRepair(litellm.RepairAll))
 		return client, defaultOpenRouterModel, err
 	default:
 		return nil, "", fmt.Errorf("unknown provider: %s (use anthropic, openai, or openrouter)", provider)

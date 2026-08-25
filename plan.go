@@ -35,6 +35,10 @@ type planArgs struct {
 	Items  []string `json:"items"`
 	Index  int      `json:"index"`
 	Status string   `json:"status"`
+	// Optional with op=write: mark this item in_progress in the same call,
+	// saving a follow-up update round trip. Pointer distinguishes "absent"
+	// from a real index 0.
+	Active *int `json:"active,omitempty"`
 }
 
 func (p *planStore) render() string {
@@ -77,6 +81,10 @@ func (s *Sigmoidh) handlePlan(_ context.Context, raw json.RawMessage, _ string) 
 	}
 	a.Op = strings.ToLower(strings.TrimSpace(a.Op))
 	st := s.plan
+	if st == nil { // defensive: never nil-deref again even if wiring changes
+		st = newPlanStore()
+		s.plan = st
+	}
 
 	switch a.Op {
 	case "write":
@@ -92,9 +100,21 @@ func (s *Sigmoidh) handlePlan(_ context.Context, raw json.RawMessage, _ string) 
 			}
 		}
 		n := len(st.items)
+		active := -1
+		if a.Active != nil {
+			if *a.Active < 0 || *a.Active >= n {
+				st.mu.Unlock()
+				return fmt.Sprintf("active %d out of range (plan has %d items)", *a.Active, n), true
+			}
+			active = *a.Active
+			st.items[active].status = planInProgress
+		}
 		st.mu.Unlock()
 		if n == 0 {
 			return "plan needs at least one non-empty item", true
+		}
+		if active >= 0 {
+			return fmt.Sprintf("plan set (item %d in progress):\n%s", active+1, st.render()), false
 		}
 		return fmt.Sprintf("plan set:\n%s", st.render()), false
 

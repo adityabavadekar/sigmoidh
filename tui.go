@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,6 +70,10 @@ type tuiCore struct {
 	ctxChars         int // char-based context estimate until real usage lands
 	lastInputTokens  int
 	outCharsSinceUse int
+	liveIn           int // mid-stream usage (cumulative for the request in flight)
+	liveOut          int
+	liveTotal        int
+	liveReason       int
 }
 
 var _ AgentObserver = (*tuiCore)(nil)
@@ -231,6 +236,8 @@ type statsSnapshot struct {
 	ctxEst             int
 	lastInputTokens    int
 	outCharsSinceUsage int
+	liveIn, liveOut    int // in-flight request usage (zero when idle)
+	liveTotal, liveR   int
 }
 
 func (c *tuiCore) snapshot() statsSnapshot {
@@ -244,6 +251,8 @@ func (c *tuiCore) snapshot() statsSnapshot {
 		ctxEst:             c.estContextTokensLocked(),
 		lastInputTokens:    c.lastInputTokens,
 		outCharsSinceUsage: c.outCharsSinceUse,
+		liveIn:             c.liveIn, liveOut: c.liveOut,
+		liveTotal: c.liveTotal, liveR: c.liveReason,
 	}
 }
 
@@ -257,6 +266,9 @@ func (c *tuiCore) OnBootstrap(version, provider, model string, readOnly bool) {
 }
 
 func (c *tuiCore) OnRequestStart() {
+	c.statMu.Lock()
+	c.liveIn, c.liveOut, c.liveTotal, c.liveReason = 0, 0, 0, 0
+	c.statMu.Unlock()
 	c.setActivity("")
 	c.setActive(true)
 }
@@ -415,6 +427,25 @@ func (c *tuiCore) OnTriggerFired(message string) {
 	c.writeCard(cardTrigger(message))
 }
 
+// OnStreamUsage receives cumulative mid-stream usage for the request in
+// flight (Anthropic reports input at message_start, then output deltas on
+// every message_delta). Counters tick live; OnTurnUsage reconciles the final
+// numbers so nothing is counted twice.
+func (c *tuiCore) OnStreamUsage(usage litellm.Usage) {
+	c.statMu.Lock()
+	c.liveIn = usage.InputTokens
+	c.liveOut = usage.OutputTokens
+	c.liveTotal = usage.TotalTokens
+	c.liveReason = usage.ReasoningTokens
+	if usage.InputTokens > 0 && c.lastInputTokens == 0 {
+		// real context size lands with message_start, long before turn end —
+		// the context meter gets accurate immediately instead of afterwards
+		c.lastInputTokens = usage.InputTokens
+	}
+	c.statMu.Unlock()
+	c.sink.footerDirty()
+}
+
 func (c *tuiCore) OnTurnUsage(usage litellm.Usage) {
 	c.statMu.Lock()
 	c.turns++
@@ -424,6 +455,7 @@ func (c *tuiCore) OnTurnUsage(usage litellm.Usage) {
 	c.tokReason += usage.ReasoningTokens
 	c.lastInputTokens = usage.InputTokens
 	c.outCharsSinceUse = 0
+	c.liveIn, c.liveOut, c.liveTotal, c.liveReason = 0, 0, 0, 0 // folded in above
 	c.statMu.Unlock()
 
 	if c.showUsage.Load() && usage.HasTokens() {
@@ -502,8 +534,9 @@ func (t *TUI) renderFooter(width int) string {
 	}
 
 	snap := t.core.snapshot()
+	tokTotal := snap.tokTotal + snap.liveTotal // live ticks during streaming
 	groups = append(groups, tg(pal.dim)+
-		fmt.Sprintf("turns %d · %s tok", snap.turns, humanNumber(snap.tokTotal))+tagReset)
+		fmt.Sprintf("turns %d · %s tok", snap.turns, humanNumber(tokTotal))+tagReset)
 
 	bar, _, pct := ctxMeterBar(snap.ctxEst, maxTokens)
 	groups = append(groups, bar+" "+strconv.Itoa(pct)+"%")
@@ -1076,6 +1109,92 @@ func (t *TUI) completeSlash() {
 	}
 }
 
+// queued prompts
+// Prompts parked behind an active run are also appended to a sidecar file, so
+// a crash (or quit) never silently eats them: on the next start they reload
+// into the queue. The file mirrors t.queue exactly — append on enqueue,
+// rewrite on dequeue, gone when empty.
+
+type pendingPrompt struct {
+	Ts   time.Time `json:"ts"`
+	Text string    `json:"text"`
+}
+
+func pendingPromptsPath() string {
+	if p := os.Getenv("SIGMOIDH_PENDING_PROMPTS"); p != "" {
+		return p // test hook
+	}
+	return filepath.Join(homeDir(), ".sigmoidh", "pending_prompts.jsonl")
+}
+
+func (t *TUI) persistQueueAppend(line string) {
+	f, err := os.OpenFile(pendingPromptsPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		logWarn("queue persist failed", "op", "append", "err", err)
+		return
+	}
+	defer f.Close()
+	data, err := json.Marshal(pendingPrompt{Ts: time.Now(), Text: line})
+	if err == nil {
+		_, err = f.Write(append(data, '\n'))
+	}
+	if err != nil {
+		logWarn("queue persist failed", "op", "append", "err", err)
+	}
+	logInfo("prompt queued", "position", len(t.queue), "chars", len(line))
+}
+
+func (t *TUI) persistQueueRewrite() {
+	t.queueMu.Lock()
+	remaining := make([]string, len(t.queue))
+	copy(remaining, t.queue)
+	t.queueMu.Unlock()
+
+	path := pendingPromptsPath()
+	if len(remaining) == 0 {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			logWarn("queue persist failed", "op", "clear", "err", err)
+		}
+		return
+	}
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		logWarn("queue persist failed", "op", "rewrite", "err", err)
+		return
+	}
+	enc := json.NewEncoder(f)
+	for _, p := range remaining {
+		if err := enc.Encode(pendingPrompt{Ts: time.Now(), Text: p}); err != nil {
+			break
+		}
+	}
+	f.Close()
+	if err := os.Rename(tmp, path); err != nil {
+		logWarn("queue persist failed", "op", "rewrite", "err", err)
+	}
+}
+
+// loadPendingPrompts recovers prompts persisted by a previous process.
+func loadPendingPrompts() []string {
+	f, err := os.Open(pendingPromptsPath())
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	var out []string
+	sc := json.NewDecoder(f)
+	for {
+		var p pendingPrompt
+		if err := sc.Decode(&p); err != nil || strings.TrimSpace(p.Text) == "" {
+			break
+		}
+		out = append(out, p.Text)
+	}
+	logInfo("recovered queued prompts from disk", "count", len(out))
+	return out
+}
+
 // submit routes enter: exit words quit, slash commands share the REPL
 // handler, and prompts run one at a time — anything submitted while a run
 // is active is queued and fires automatically when the run finishes.
@@ -1117,6 +1236,7 @@ func (t *TUI) submit() {
 		t.queue = append(t.queue, line)
 		n := len(t.queue)
 		t.queueMu.Unlock()
+		t.persistQueueAppend(line)
 		t.core.writeCard(cardQueued(line, n))
 		t.core.sink.footerDirty()
 		return
@@ -1170,6 +1290,7 @@ func (t *TUI) endRun(err error) {
 		t.queue = t.queue[1:]
 	}
 	t.queueMu.Unlock()
+	t.persistQueueRewrite() // keep the sidecar in sync after every drain
 	if next != "" {
 		if t.tryBeginRun() { // serial: one queued prompt per finished run
 			t.startRun(next)
@@ -1259,6 +1380,15 @@ func (t *TUI) Run() error {
 	t.core.writeCard(cardBoot(VERSION, t.core.provider, t.core.model, t.core.readOnly))
 	if !agenttools.SandboxEnabled() {
 		t.core.writeCard(cardNotice("sandbox disabled — bash/exec run with full host access"))
+	}
+	if leftovers := loadPendingPrompts(); len(leftovers) > 0 {
+		t.queueMu.Lock()
+		t.queue = append(t.queue, leftovers...)
+		n := len(t.queue)
+		t.queueMu.Unlock()
+		t.core.writeCard(cardNotice(fmt.Sprintf("%d queued prompt%s recovered from the previous session",
+			len(leftovers), plural(len(leftovers)))))
+		logInfo("queue restored", "recovered", len(leftovers), "total", n)
 	}
 	t.renderHistory() // replay resumed sessions before the live feed starts
 

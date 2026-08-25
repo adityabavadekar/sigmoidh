@@ -93,6 +93,14 @@ func main() {
 		fatal(err)
 	}
 
+	if closer, lerr := setupLogging(filepath.Join(homeDir(), ".sigmoidh"), *debug); lerr != nil {
+		fmt.Fprintf(os.Stderr, "%s  ⚠ file logging unavailable: %v%s\n", ansiYellow, lerr, ansiReset)
+	} else {
+		defer closer()
+	}
+	logInfo("startup", "version", VERSION, "provider", *provider, "model", defaultModelFor(*provider),
+		"workdir", workDir, "readonly", *readOnlyMode, "sandbox", !*noSandbox, "tui", *tuiMode, "debug", *debug)
+
 	ensureMemoryFileDir()
 	pruneSpillFiles()
 	agenttools.SetAllowedPaths(memoryFilePath())

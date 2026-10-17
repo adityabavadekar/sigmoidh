@@ -13,20 +13,60 @@ import (
 type slashCommand struct {
 	name string
 	desc string
+	// concurrent commands are safe to run while an agent run is in flight:
+	// they only read state or flip a display/behaviour toggle and never touch
+	// the conversation or start a run. Everything else is queued until the
+	// active run finishes (see TUI.runSlash).
+	concurrent bool
 }
 
 var slashCommands = []slashCommand{
-	{"/help", "show available commands"},
-	{"/usage", "session token/tool statistics"},
-	{"/thinking", "model thinking display [on|off] (default: on)"},
-	{"/statsline", "per-turn usage line [on|off] (default: off)"},
-	{"/sandbox", "bash sandbox isolation [on|off]"},
-	{"/mouse", "wheel capture [on|off] (alt+m)"},
-	{"/resume", "resume a previous session [n | list]"},
-	{"/copy", "copy responses to clipboard [all | last | num n]"},
-	{"/undo", "revert the file changes of the last run (write/edit/apply_patch)"},
-	{"/compact", "summarize older conversation to free context"},
-	{"/exit", "exit sigmoidh"},
+	{"/help", "show available commands", true},
+	{"/usage", "session token/tool statistics", true},
+	{"/thinking", "model thinking display [on|off] (default: on)", true},
+	{"/statsline", "per-turn usage line [on|off] (default: off)", true},
+	{"/sandbox", "bash sandbox isolation [on|off]", true},
+	{"/git-guard", "block git push and commit commands [on|off] (default: on)", true},
+	{"/away", "keep working without asking questions", true},
+	{"/back", "resume normal question behavior", true},
+	{"/caveman", "ultra-terse replies [on|off]", true},
+	{"/deep-research", "research one question with depth: /deep-research <question>", false},
+	{"/mouse", "wheel capture [on|off] (alt+m)", true},
+	{"/resume", "resume a previous session [n | list]", false},
+	{"/copy", "copy responses to clipboard [all | last | num n]", true},
+	{"/undo", "revert the file changes of the last run (write/edit/apply_patch)", false},
+	{"/compact", "summarize older conversation to free context", false},
+	{"/handoff", "write a continuation summary for another agent [path]", false},
+	{"/skill", "distill this session into a reusable skill [path]", false},
+	{"/transcript", "export this session as Markdown [path]", false},
+	{"/exit", "exit sigmoidh", false},
+}
+
+// isConcurrentSlashCommand reports whether name (with or without a leading
+// slash) may run while a run is in progress.
+func isConcurrentSlashCommand(name string) bool {
+	if !strings.HasPrefix(name, "/") {
+		name = "/" + name
+	}
+	for _, c := range slashCommands {
+		if c.name == name {
+			return c.concurrent
+		}
+	}
+	return false
+}
+
+// slashCommandName extracts the command token from a typed slash line,
+// e.g. "/compact now" -> "/compact". It returns "" for non-slash input.
+func slashCommandName(line string) string {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "/") {
+		return ""
+	}
+	if i := strings.IndexAny(line, " \t"); i >= 0 {
+		return line[:i]
+	}
+	return line
 }
 
 var bareExitWords = map[string]bool{"exit": true, "quit": true, "q": true}

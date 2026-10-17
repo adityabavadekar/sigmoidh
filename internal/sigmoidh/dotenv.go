@@ -21,6 +21,7 @@ func loadDotEnvGlobal() {
 }
 
 func loadDotEnv(path string) {
+	path = expandHome(path)
 	f, err := os.Open(path)
 	if err != nil {
 		return
@@ -45,4 +46,15 @@ func loadDotEnv(path string) {
 		}
 		os.Setenv(key, val)
 	}
+}
+
+// expandHome expands a leading ~ so paths from the shell (which keeps them
+// literal when quoted) still resolve.
+func expandHome(p string) string {
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, strings.TrimPrefix(p, "~"))
+		}
+	}
+	return p
 }

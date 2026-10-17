@@ -12,7 +12,7 @@ const (
 )
 
 var definitions = []litellm.Tool{
-	mustTool("bash", "Run a shell command in the working directory and return its combined output (2 min timeout). For long-running or interactive processes use exec. Destructive commands on system paths or the home directory are refused.", map[string]any{
+	mustTool("bash", "Run shell command in workspace, wait for output (2 min timeout). For short commands and waits (sleep 10). exec only for processes staying alive in background — it returns before they finish. Destructive commands on system/home paths refused.", map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"command": map[string]any{"type": "string", "description": "shell command to execute"},
@@ -111,7 +111,7 @@ var definitions = []litellm.Tool{
 			"command": map[string]any{"type": "string", "description": "exact test command, e.g. go test ./... or npm test -- -t login; may be omitted only if the project pins one"},
 		},
 	}),
-	mustTool("exec", "Start a long-running or interactive command (server, watcher, REPL) in the background. Returns a session id and initial output; use write_stdin to send input or poll.", map[string]any{
+	mustTool("exec", "Start background command (server, watcher, REPL); returns before it finishes, with session id and initial output. write_stdin sends input. Notification on exit; run auto-resumes with captured output if any — no need to keep checking. Plain sleeps refused (use bash). Periodic wake-up: schedule op=once, check status on each hit. Timer/reminder: schedule op=once.", map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"command":       map[string]any{"type": "string"},
@@ -119,7 +119,7 @@ var definitions = []litellm.Tool{
 		},
 		"required": []string{"command"},
 	}),
-	mustTool("write_stdin", "Send input to an exec session and return its new output. Empty chars polls for output.", map[string]any{
+	mustTool("write_stdin", "Send characters to exec session stdin (include \\n for enter); returns new output. close_input closes stdin so the command can finish.", map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"session_id":    map[string]any{"type": "integer"},
@@ -143,18 +143,25 @@ var definitions = []litellm.Tool{
 		},
 		"required": []string{"prompt"},
 	}),
-	mustTool("trigger", "Schedule a desktop notification. Use only when the user asked to be told when something finishes.", map[string]any{
+	mustTool("notify_user", "Request desktop notification when this run finishes. Only if user asked to be told later.", map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"when": map[string]any{
-				"type":        "string",
-				"enum":        []string{"run_complete", "command_done"},
-				"description": "run_complete: when this task finishes; command_done: when an exec session's command exits",
-			},
-			"message":    map[string]any{"type": "string", "description": "notification text; default: Task completed."},
-			"session_id": map[string]any{"type": "integer", "description": "exec session id; required for command_done"},
+			"message": map[string]any{"type": "string", "description": "Notification text; defaults to Task completed."},
 		},
-		"required": []string{"when"},
+	}),
+	mustTool("schedule", "Create or cancel scheduled agent tasks: op=once (delay + task prompt, runs as agent turn when due), op=cron (recurring expression + task); cancel by id. Listing is status's job. Lives only while this process is open.", map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"op":         map[string]any{"type": "string", "enum": []string{"once", "cron", "cancel"}},
+			"delay":      map[string]any{"type": "string", "description": "once: delay such as 15m, 2h, or 1h30m"},
+			"expression": map[string]any{"type": "string", "description": "cron: five local-time fields, for example '0 9 * * 1-5'; supports numbers, *, */step, ranges, and comma lists"},
+			"task":       map[string]any{"type": "string", "description": "task prompt to run on schedule"},
+			"id":         map[string]any{"type": "integer", "description": "cancel: scheduled task id"},
+		},
+		"required": []string{"op"},
+	}),
+	mustTool("status", "Read scheduled agent tasks and exec session states (active/completed).", map[string]any{
+		"type": "object",
 	}),
 	mustTool("memory", "Scratchpad for long tasks: save facts you will need later (decisions, paths, findings). It survives context compaction, so older tool output can be dropped safely. Not needed for short tasks. Ops: write (key, value), read (key), delete (key), list, clear.", map[string]any{
 		"type": "object",
@@ -183,7 +190,15 @@ var definitions = []litellm.Tool{
 		},
 		"required": []string{"query"},
 	}),
-	mustTool("ask_user", "Ask the user a question when you cannot proceed without their decision; your turn ends and their reply comes as the next message. Don't ask about things you can find out yourself.", map[string]any{
+	mustTool("skill", "Reusable recipes for common non-code tasks (slides, video, PDF/DOCX, spreadsheets, diagrams, images, audio), each naming the concrete tooling to use. op=list shows what is available; load the one matching the task before starting it; save persists a new recipe to the project.", map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"op":   map[string]any{"type": "string", "enum": []string{"list", "load", "save"}, "description": "default list"},
+			"name": map[string]any{"type": "string", "description": "load/save: skill name or alias, e.g. slides"},
+			"body": map[string]any{"type": "string", "description": "save: recipe markdown"},
+		},
+	}),
+	mustTool("ask_user", "Ask blocking question only when you cannot proceed without the user's decision; turn ends, reply comes as next message. Don't ask what you can find out yourself. Away mode: no questions — conservative, reversible choices only; away never authorizes destructive, irreversible, external or wider-scope actions, nor bypassing safeguards.", map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"question": map[string]any{"type": "string"},
@@ -193,7 +208,7 @@ var definitions = []litellm.Tool{
 	}),
 }
 
-var readOnlyTools = []string{"read", "search", "list_files", "batch_read", "code_nav", "web"}
+var readOnlyTools = []string{"read", "search", "list_files", "batch_read", "code_nav", "web", "status"}
 
 // For O(1) lookup of read-only tools.
 var readOnlyToolSet = func() map[string]struct{} {

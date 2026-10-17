@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-# Records the README / website demos.
+# Records the demos.
 #
 #   demo/record.sh            # both
 #   demo/record.sh cli|tui    # one
 #
-# Drives a real sigmoidh run: asciinema records inside a detached tmux pane
-# (so no tmux chrome is captured) and keystrokes are typed with send-keys.
-# Outputs docs/media/<name>.gif (README) and website/public/media/<name>.{mp4,jpg}.
-# Needs: tmux, asciinema, agg, ffmpeg, bwrap, and a configured provider in .env.
+# Real Sigmoidh run: asciinema inside a tmux pane
+# Requires: tmux, asciinema, agg, ffmpeg, bwrap, and a configured provider in .env.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)

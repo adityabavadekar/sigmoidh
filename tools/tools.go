@@ -11,19 +11,20 @@ import (
 )
 
 const (
-	refusalBashDestructive = `Refused: destructive command targets a protected path or pattern. Use a specific working-directory or /tmp path.`
-	refusalReadSensitive   = `Refused: sensitive credential/secret file. Ask the user for required values instead.`
-	refusalReadBinary      = `Refused: binary file. This tool only reads text-based files.`
-	refusalWriteSensitive  = `Refused: sensitive credential/secret file. Direct access is not permitted.`
-	refusalWriteProtected  = `Refused: protected system path. Use a working-directory or /tmp path.`
-	refusalEditSensitive   = `Refused: sensitive credential/secret file. Ask the user for required values instead.`
-	refusalEditBinary      = `Refused: binary file. This tool only edits text-based files.`
-	refusalEditProtected   = `Refused: protected system path. Use a working-directory or /tmp path.`
-	editErrNotFound        = `Edit failed: old_str was not found in the file. No changes were made.`
-	editErrAmbiguous       = `Edit failed: old_str matches more than once in the file. Include more surrounding context so it matches exactly one location. No changes were made.`
-	editErrEmptyOldStr     = `Edit failed: old_str is empty. Provide the exact text to replace.`
-	readOnlyModeErr        = `Refused: READ-ONLY mode is enabled. This tool is not allowed.`
-	emptyOutputStr         = `(no output)`
+	refusalBashDestructive   = `Refused: destructive command targets a protected path or pattern. Use a specific working-directory or /tmp path.`
+	refusalReadSensitive     = `Refused: sensitive credential/secret file. Ask the user for required values instead.`
+	refusalReadBinary        = `Refused: binary file. This tool only reads text-based files.`
+	refusalWriteSensitive    = `Refused: sensitive credential/secret file. Direct access is not permitted.`
+	refusalWriteProtected    = `Refused: protected system path. Use a working-directory or /tmp path.`
+	refusalEditSensitive     = `Refused: sensitive credential/secret file. Ask the user for required values instead.`
+	refusalEditBinary        = `Refused: binary file. This tool only edits text-based files.`
+	refusalEditProtected     = `Refused: protected system path. Use a working-directory or /tmp path.`
+	editErrNotFound          = `Edit failed: old_str was not found in the file. No changes were made.`
+	editErrAmbiguous         = `Edit failed: old_str matches more than once in the file. Include more surrounding context so it matches exactly one location. No changes were made.`
+	editErrEmptyOldStr       = `Edit failed: old_str is empty. Provide the exact text to replace.`
+	readOnlyModeErr          = `Refused: READ-ONLY mode is enabled. This tool is not allowed.`
+	emptyOutputStr           = `(no output)`
+	refusalBashGitPushCommit = `Refused: git push and git commit are blocked by the active guard. Only the user can change this protection setting.`
 )
 
 type bashArgs struct {
@@ -104,8 +105,9 @@ type webArgs struct {
 }
 
 var (
-	readOnlyMode   bool
-	sandboxEnabled = true // bwrap isolation for bash/exec; toggled via SetSandboxEnabled
+	readOnlyMode       bool
+	sandboxEnabled     = true // bwrap isolation for bash/exec; toggled via /sandbox
+	gitPushCommitGuard = true
 )
 
 // SetSandboxEnabled turns the bubblewrap jail on/off for bash and exec.
@@ -116,6 +118,11 @@ func SetSandboxEnabled(enabled bool) {
 }
 
 func SandboxEnabled() bool { return sandboxEnabled }
+
+// SetGitPushCommitGuard controls the shell guard for git push and git commit.
+func SetGitPushCommitGuard(enabled bool) { gitPushCommitGuard = enabled }
+
+func GitPushCommitGuardEnabled() bool { return gitPushCommitGuard }
 
 // externalHandlers lets the host application supply tool implementations that
 // live outside this package (e.g. a sub-agent runner needing the LLM client).
@@ -302,10 +309,12 @@ func truncate(s string) string {
 // externalDescriptions lets the host describe handler-based tools for -list-tools.
 var externalDescriptions = map[string]string{
 	"subagent":       "Spawn a focused sub-agent that completes one task autonomously and returns its report.",
-	"trigger":        "Schedule a desktop notification (run_complete / command_done events).",
+	"notify_user":    "Request desktop notification when this run finishes.",
+	"schedule":       "Create or cancel scheduled agent tasks (timer/cron); cancel by id.",
+	"status":         "Read scheduled tasks and exec session states.",
 	"memory":         "Session working memory: terse key/value scratchpad across turns.",
 	"plan":           "Task checklist with statuses; keep exactly one item in_progress.",
-	"ask_user":       "Ask the user a blocking clarifying question, then end turn.",
+	"ask_user":       "Ask blocking question; away mode forbids interrupting the user.",
 	"session_search": "Full-text search across all past session transcripts.",
 }
 

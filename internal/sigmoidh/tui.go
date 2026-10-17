@@ -835,6 +835,8 @@ type TUI struct {
 	mouseOn    bool     // mouse capture: wheel scrolling vs native text selection
 	queue      []string // prompts waiting for the active run to finish
 	queueMu    sync.Mutex
+	slashQueue []string // non-concurrent slash commands waiting for the run to finish
+	slashMu    sync.Mutex
 	accel      int // scroll multiplier from rapid keypresses
 	lastScroll time.Time
 	lastDir    int
@@ -1427,11 +1429,15 @@ func (t *TUI) submit() {
 }
 
 // startRun echoes the prompt and hands it to the agent on a worker.
-func (t *TUI) startRun(line string) {
-	t.core.writeCard(cardUserPrompt(line, t.core.feed.innerWidth()))
+func (t *TUI) startRun(line string) { t.startRunAs(line, line) }
+
+// startRunAs runs line but echoes echo (used when a slash command expands to a
+// turn, e.g. /deep-research, so the transcript shows what the user typed).
+func (t *TUI) startRunAs(echo, line string) {
+	t.core.writeCard(cardUserPrompt(echo, t.core.feed.innerWidth()))
 	t.core.addCtxChars(len(line))
 	if t.agent != nil {
-		notifyUserInput(t.agent.observer, line)
+		notifyUserInput(t.agent.observer, echo)
 	}
 	go t.runAgent(line)
 }
@@ -1464,6 +1470,20 @@ func (t *TUI) endRun(err error) {
 	}
 	t.core.setActive(false)
 	t.core.sink.footerDirty()
+
+	// Slash commands parked during the run go first; a queued command that
+	// starts its own run (e.g. /deep-research) halts the drain so serial
+	// execution is preserved.
+	for {
+		line := t.popSlash()
+		if line == "" {
+			break
+		}
+		t.execSlash(line)
+		if t.core.isActive() {
+			return
+		}
+	}
 
 	t.queueMu.Lock()
 	var next string
@@ -1499,15 +1519,32 @@ func (t *TUI) runAgent(line string) {
 	}
 }
 
-// runSlash executes REPL slash commands unchanged, capturing their stdout /
-// stderr chatter so it renders as a quiet card instead of trashing the screen.
+// runSlash dispatches a slash command. Concurrent-safe commands run right away
+// even while a run is in flight; everything else is parked until the active run
+// finishes so it cannot race the conversation or freeze the UI mid-run.
 func (t *TUI) runSlash(line string) {
 	if t.agent == nil {
 		t.core.writeCard(cardError(errors.New("no agent bound")))
 		return
 	}
+	name := slashCommandName(line)
+	if t.core.isActive() && name != "" && !isConcurrentSlashCommand(name) {
+		n := t.enqueueSlash(line)
+		t.core.writeCard(cardNotice(fmt.Sprintf("queued %s — runs when the current task finishes (position %d)", name, n)))
+		t.core.sink.footerDirty()
+		return
+	}
+	t.execSlash(line)
+}
+
+// execSlash performs the slash command body, capturing its stdout / stderr
+// chatter so it renders as a quiet card instead of trashing the screen.
+func (t *TUI) execSlash(line string) {
+	var runPrompt string
 	out, err := captureOutput(func() error {
-		return handleSlashCommand(t.baseCtx, t.agent, line)
+		var herr error
+		runPrompt, herr = handleSlashCommand(t.baseCtx, t.agent, line)
+		return herr
 	})
 	if errors.Is(err, errExitRequest) {
 		t.quit()
@@ -1517,9 +1554,42 @@ func (t *TUI) runSlash(line string) {
 		t.core.writeCard(cardError(err))
 		return
 	}
+	if runPrompt != "" {
+		// The command expands into an agent turn: run it like a prompt.
+		if !t.tryBeginRun() {
+			t.queueMu.Lock()
+			t.queue = append(t.queue, runPrompt)
+			n := len(t.queue)
+			t.queueMu.Unlock()
+			t.persistQueueAppend(runPrompt)
+			t.core.writeCard(cardQueued(runPrompt, n))
+			t.core.sink.footerDirty()
+			return
+		}
+		t.startRunAs(line, runPrompt)
+		return
+	}
 	if card := cardDimBlock(out); card != "" {
 		t.core.writeCard(card)
 	}
+}
+
+func (t *TUI) enqueueSlash(line string) int {
+	t.slashMu.Lock()
+	defer t.slashMu.Unlock()
+	t.slashQueue = append(t.slashQueue, line)
+	return len(t.slashQueue)
+}
+
+func (t *TUI) popSlash() string {
+	t.slashMu.Lock()
+	defer t.slashMu.Unlock()
+	if len(t.slashQueue) == 0 {
+		return ""
+	}
+	line := t.slashQueue[0]
+	t.slashQueue = t.slashQueue[1:]
+	return line
 }
 
 // captureOutput swaps the process std streams around fn and returns whatever

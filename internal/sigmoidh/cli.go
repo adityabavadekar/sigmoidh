@@ -373,14 +373,27 @@ func repl(ctx context.Context, smh *Sigmoidh, provider, model string, oneShotPro
 
 		// Pasted blocks are always prompts, never commands.
 		if !pasted && strings.HasPrefix(line, "/") {
-			err := handleSlashCommand(ctx, smh, line)
+			runPrompt, err := handleSlashCommand(ctx, smh, line)
 			switch {
 			case errors.Is(err, errExitRequest):
 				smh.OnRunComplete()
+				fmt.Fprintf(os.Stderr, "%s%s%s\n", ansiDim, EXIT_MESSAGE, ansiReset)
 				printResumeHint(smh)
 				return
 			case err != nil:
 				fmt.Fprintln(os.Stderr, "error:", err)
+			case runPrompt != "":
+				// A command that expands to a turn (e.g. /deep-research):
+				// dispatch it through the normal run path.
+				notifyUserInput(smh.observer, line)
+				runErr := smh.Run(ctx, runPrompt)
+				smh.fireRunCompleteTriggers()
+				if runErr != nil {
+					fmt.Fprintln(os.Stderr, "error:", runErr)
+				}
+				if *ping {
+					PingUser()
+				}
 			}
 			continue
 		}
@@ -401,6 +414,7 @@ func repl(ctx context.Context, smh *Sigmoidh, provider, model string, oneShotPro
 		}
 	}
 	smh.OnRunComplete()
+	fmt.Fprintf(os.Stderr, "%s%s%s\n", ansiDim, EXIT_MESSAGE, ansiReset)
 	printResumeHint(smh)
 }
 
@@ -423,6 +437,7 @@ func handleBoolToggle(get func() bool, set func(bool), label, usageName string, 
 	visible := get()
 	switch len(args) {
 	case 0:
+		visible = !visible
 	case 1:
 		switch strings.ToLower(args[0]) {
 		case "on":
@@ -496,11 +511,19 @@ func handleResume(smh *Sigmoidh, args []string) error {
 	return nil
 }
 
-func handleSlashCommand(ctx context.Context, smh *Sigmoidh, line string) error {
-	line = line[1:]
+// handleSlashCommand runs a REPL slash command. Most commands act immediately
+// and return ""; a command that expands into an agent turn (e.g.
+// /deep-research) returns the prompt to run, which the caller dispatches
+// through the normal run path so streaming and observers stay intact.
+func handleSlashCommand(ctx context.Context, smh *Sigmoidh, line string) (string, error) {
+	line = strings.TrimPrefix(line, "/")
+	rest := ""
+	if i := strings.IndexAny(line, " \t"); i >= 0 {
+		rest = strings.TrimSpace(line[i+1:])
+	}
 	parts := strings.Fields(line)
 	if len(parts) == 0 {
-		return fmt.Errorf("empty command")
+		return "", fmt.Errorf("empty command")
 	}
 	cmd := parts[0]
 	args := parts[1:]
@@ -508,49 +531,111 @@ func handleSlashCommand(ctx context.Context, smh *Sigmoidh, line string) error {
 	switch cmd {
 	case "help":
 		printSlashHelp(os.Stderr)
-		return nil
+		return "", nil
 
 	case "thinking":
-		return handleBoolToggle(smh.observer.ThinkingVisible,
+		return "", handleBoolToggle(smh.observer.ThinkingVisible,
 			smh.observer.SetThinkingVisible, "thinking display", "/thinking", args)
 	case "statsline":
-		return handleBoolToggle(smh.observer.UsageVisible,
+		return "", handleBoolToggle(smh.observer.UsageVisible,
 			smh.observer.SetUsageVisible, "stats line", "/statsline", args)
 	case "sandbox":
-		return handleBoolToggle(agenttools.SandboxEnabled,
+		return "", handleBoolToggle(agenttools.SandboxEnabled,
 			agenttools.SetSandboxEnabled, "bash sandbox", "/sandbox", args)
+	case "git-guard":
+		return "", handleBoolToggle(agenttools.GitPushCommitGuardEnabled,
+			agenttools.SetGitPushCommitGuard, "git push/commit guard", "/git-guard", args)
+	case "away":
+		if len(args) != 0 {
+			return "", fmt.Errorf("usage: /away")
+		}
+		smh.SetAway(true)
+		fmt.Fprintln(os.Stderr, "Away mode on: I’ll avoid questions and use conservative, reversible choices. This does not authorize destructive or external actions or bypass safeguards.")
+		return "", nil
+	case "back":
+		if len(args) != 0 {
+			return "", fmt.Errorf("usage: /back")
+		}
+		smh.SetAway(false)
+		fmt.Fprintln(os.Stderr, "Away mode off: questions can be asked again.")
+		return "", nil
+	case "caveman":
+		return "", handleBoolToggle(smh.Caveman, smh.SetCaveman, "caveman mode", "/caveman", args)
+	case "deep-research":
+		topic := strings.Trim(rest, "\"'")
+		if topic == "" {
+			return "", fmt.Errorf("usage: /deep-research <question>")
+		}
+		return researchDirective + "\n\n" + topic, nil
 	case "resume":
-		return handleResume(smh, args)
+		return "", handleResume(smh, args)
 
 	case "undo":
-		return handleUndo(smh)
+		return "", handleUndo(smh)
 	case "compact":
 		before, after, err := smh.Compact(ctx)
 		if err != nil {
-			return err
+			return "", err
 		}
 		fmt.Fprintf(os.Stderr, "%s● context compacted: ~%s → ~%s tokens%s\n", ansiDim, humanNumber(before), humanNumber(after), ansiReset)
-		return nil
+		return "", nil
+	case "transcript":
+		if len(args) > 1 {
+			return "", fmt.Errorf("usage: /transcript [path]")
+		}
+		path := ""
+		if len(args) == 1 {
+			path = args[0]
+		}
+		return "", exportMarkdownTranscript(smh, path)
+	case "handoff":
+		if len(args) > 1 {
+			return "", fmt.Errorf("usage: /handoff [path]")
+		}
+		path := ""
+		if len(args) == 1 {
+			path = args[0]
+		}
+		report, err := writeSessionHandoff(smh, path)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintln(os.Stderr, report)
+		return "", nil
+	case "skill":
+		if len(args) > 1 {
+			return "", fmt.Errorf("usage: /skill [path]")
+		}
+		path := ""
+		if len(args) == 1 {
+			path = args[0]
+		}
+		report, err := writeSessionSkill(smh, path)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintln(os.Stderr, report)
+		return "", nil
 
 	case "exit":
-		return errExitRequest
+		return "", errExitRequest
 	case "usage":
 		smh.PrintStats()
-		return nil
+		return "", nil
 	case "copy":
 		if len(smh.lastTexts) == 0 {
-			return fmt.Errorf("no previous responses to copy")
+			return "", fmt.Errorf("no previous responses to copy")
 		}
 
 		if len(args) == 0 {
-			return copyToClipboard(smh.lastTexts[len(smh.lastTexts)-1])
+			return "", copyToClipboard(smh.lastTexts[len(smh.lastTexts)-1])
 		}
 
 		switch args[0] {
 		case "all":
-			return copyToClipboard(strings.Join(smh.lastTexts, "\n"))
+			return "", copyToClipboard(strings.Join(smh.lastTexts, "\n"))
 		case "last":
-			return copyToClipboard(smh.lastTexts[len(smh.lastTexts)-1])
+			return "", copyToClipboard(smh.lastTexts[len(smh.lastTexts)-1])
 		case "num":
 			count := 1
 			if len(args) > 1 {
@@ -562,12 +647,12 @@ func handleSlashCommand(ctx context.Context, smh *Sigmoidh, line string) error {
 				count = len(smh.lastTexts)
 			}
 			start := len(smh.lastTexts) - count
-			return copyToClipboard(strings.Join(smh.lastTexts[start:], "\n"))
+			return "", copyToClipboard(strings.Join(smh.lastTexts[start:], "\n"))
 		default:
-			return fmt.Errorf("usage: /copy [all|last|num <n>]")
+			return "", fmt.Errorf("usage: /copy [all|last|num <n>]")
 		}
 	default:
-		return fmt.Errorf("unknown slash command: /%s", cmd)
+		return "", fmt.Errorf("unknown slash command: /%s", cmd)
 	}
 }
 

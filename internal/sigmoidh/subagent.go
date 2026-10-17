@@ -29,11 +29,14 @@ type subagentArgs struct {
 // the LLM client or session state.
 func registerHostTools(s *Sigmoidh) {
 	agenttools.RegisterExternalHandler("subagent", s.runSubagent)
-	agenttools.RegisterExternalHandler("trigger", s.handleTrigger)
+	agenttools.RegisterExternalHandler("notify_user", s.handleNotifyUser)
 	agenttools.RegisterExternalHandler("memory", s.handleMemory)
 	agenttools.RegisterExternalHandler("plan", s.handlePlan)
 	agenttools.RegisterExternalHandler("ask_user", s.handleAskUser)
 	agenttools.RegisterExternalHandler("session_search", s.handleSessionSearch)
+	agenttools.RegisterExternalHandler("schedule", s.handleSchedule)
+	agenttools.RegisterExternalHandler("status", s.handleStatus)
+	agenttools.RegisterExternalHandler("skill", s.handleSkill)
 }
 
 // runSubagent executes one child agent run and returns its final report.

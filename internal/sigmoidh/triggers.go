@@ -9,9 +9,7 @@ import (
 	agenttools "github.com/adityabavadekar/sigmoidh/tools"
 )
 
-// triggerArgs is the schema for the agent-invokable "trigger" tool: the model
-// can schedule a desktop notification for when the run or a background
-// command finishes.
+// triggerArgs remains for compatibility with internal notification tests.
 type triggerArgs struct {
 	When      string `json:"when"`
 	Message   string `json:"message"`
@@ -43,10 +41,10 @@ func (s *Sigmoidh) handleTrigger(_ context.Context, raw json.RawMessage, _ strin
 		if a.SessionID <= 0 {
 			return "session_id is required when when=command_done (use the id returned by exec)", true
 		}
-		ok := agenttools.NotifyOnExecSessionDone(a.SessionID, func(err error) {
+		ok := agenttools.OnExecSessionDone(a.SessionID, func(result agenttools.ExecSessionResult) {
 			text := msg
-			if err != nil {
-				text = fmt.Sprintf("%s (command exited with error: %v)", msg, err)
+			if result.Err != nil {
+				text = fmt.Sprintf("%s (command exited with error: %v)", msg, result.Err)
 			}
 			notifyFn(PING_NOTIFICATION_TITLE, text)
 			s.observer.OnTriggerFired(text)
@@ -59,6 +57,23 @@ func (s *Sigmoidh) handleTrigger(_ context.Context, raw json.RawMessage, _ strin
 	default:
 		return `when must be "run_complete" or "command_done"`, true
 	}
+}
+
+type notifyUserArgs struct {
+	Message string `json:"message"`
+}
+
+func (s *Sigmoidh) handleNotifyUser(_ context.Context, raw json.RawMessage, _ string) (string, bool) {
+	var a notifyUserArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return err.Error(), true
+	}
+	message := strings.TrimSpace(a.Message)
+	if message == "" {
+		message = PING_NOTIFICATION_MESSAGE
+	}
+	s.triggers = append(s.triggers, message)
+	return fmt.Sprintf("Will notify the user when this run completes (%s).", message), false
 }
 
 // fireRunCompleteTriggers sends and clears pending run_complete notifications.

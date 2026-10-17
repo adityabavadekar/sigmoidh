@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	agenttools "github.com/adityabavadekar/sigmoidh/tools"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/table"
 	"github.com/mattn/go-runewidth"
@@ -60,6 +61,7 @@ type sessionInfo struct {
 	Tools   int    // tool calls
 	Files   int    // distinct files changed by write/edit/apply_patch
 	LastAt  time.Time
+	Title   string
 }
 
 // listSessions returns paths of saved transcripts, newest first.
@@ -92,6 +94,68 @@ func listSessions(dir string) ([]string, error) {
 	return files, nil
 }
 
+// exportMarkdownTranscript writes the current JSONL session as a readable
+// Markdown document. The default destination is the working directory.
+func exportMarkdownTranscript(s *Sigmoidh, destination string) error {
+	if s == nil || s.currentHistoryPath() == "" {
+		return fmt.Errorf("this session has no saved transcript yet")
+	}
+	if destination == "" {
+		destination = filepath.Join(s.workDir, filepath.Base(s.CurrentSessionName())+".md")
+	}
+	if !filepath.IsAbs(destination) {
+		destination = filepath.Join(s.workDir, destination)
+	}
+	input, err := os.Open(s.currentHistoryPath())
+	if err != nil {
+		return fmt.Errorf("open session transcript: %w", err)
+	}
+	defer input.Close()
+
+	var out strings.Builder
+	title := s.CurrentSessionTitle()
+	if title == "" {
+		title = s.CurrentSessionName()
+	}
+	fmt.Fprintf(&out, "# %s\n\n", title)
+	scanner := bufio.NewScanner(input)
+	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	for scanner.Scan() {
+		var entry historyEntry
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil || entry.Role == "" || entry.Role == "system" {
+			continue
+		}
+		fmt.Fprintf(&out, "## %s\n\n", strings.ToUpper(entry.Role[:1])+entry.Role[1:])
+		if entry.Timestamp != "" {
+			fmt.Fprintf(&out, "_%s_\n\n", entry.Timestamp)
+		}
+		if entry.Content != "" {
+			fmt.Fprintf(&out, "%s\n\n", entry.Content)
+		}
+		if entry.Reasoning != "" {
+			fmt.Fprintf(&out, "<details><summary>Reasoning</summary>\n\n%s\n\n</details>\n\n", entry.Reasoning)
+		}
+		for _, call := range entry.ToolCalls {
+			fmt.Fprintf(&out, "### Tool: %s\n\n```json\n%s\n```\n\n", call.Name, strings.TrimSpace(string(call.Args)))
+		}
+		for _, result := range entry.Results {
+			label := "Result"
+			if result.IsError {
+				label = "Tool error"
+			}
+			fmt.Fprintf(&out, "**%s**\n\n```text\n%s\n```\n\n", label, result.Output)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("read session transcript: %w", err)
+	}
+	if err := os.WriteFile(destination, []byte(out.String()), 0o644); err != nil {
+		return fmt.Errorf("write Markdown transcript: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "Markdown transcript saved to %s\n", destination)
+	return nil
+}
+
 // scanSession reads a whole transcript to extract metadata: the directory it
 // ran in, its length, and the first user message as a preview. Malformed
 // lines are tolerated.
@@ -122,6 +186,7 @@ func scanSession(path string) (sessionInfo, error) {
 		}
 		var e struct {
 			Ts        string `json:"ts"`
+			Title     string `json:"title"`
 			Role      string `json:"role"`
 			Cwd       string `json:"cwd"`
 			Content   string `json:"content"`
@@ -135,6 +200,9 @@ func scanSession(path string) (sessionInfo, error) {
 		}
 		if info.Cwd == "" {
 			info.Cwd = e.Cwd
+		}
+		if info.Title == "" {
+			info.Title = e.Title
 		}
 		if e.Role != "" && e.Role != "system" {
 			info.Msgs++
@@ -195,6 +263,15 @@ func substantiveRequest(s string) string {
 		i++
 	}
 	return strings.Join(words[i:], " ")
+}
+
+func sessionTitle(prompt string) string {
+	title := strings.TrimSpace(substantiveRequest(firstLine(prompt, 100)))
+	title = strings.Trim(title, " \t\r\n.,!?;:-")
+	if title == "" {
+		title = strings.TrimSpace(firstLine(prompt, 100))
+	}
+	return truncatePreview(title, 64)
 }
 
 // changedPaths extracts the files a mutating tool call touched.
@@ -346,7 +423,10 @@ func printSessionTable(infos []sessionInfo) {
 		if i == 0 {
 			num = "›1" // what -continue would pick
 		}
-		req := si.Request
+		req := si.Title
+		if req == "" {
+			req = si.Request
+		}
 		if req == "" {
 			req = "-"
 		}
@@ -509,6 +589,13 @@ func (s *Sigmoidh) ResumeFrom(path string) (int, error) {
 		return 0, err
 	}
 	logInfo("resuming session", "path", filepath.Base(path), "messages", len(msgs))
+	if info, err := scanSession(path); err == nil {
+		title := info.Title
+		if title == "" {
+			title = sessionTitle(info.Request)
+		}
+		s.setSessionTitle(title)
+	}
 
 	s.messages = append(s.messages[:1], msgs...) // keep fresh system prompt at [0]
 
@@ -537,7 +624,10 @@ func (s *Sigmoidh) ResumeFrom(path string) (int, error) {
 			s.historyFile.Close()
 		}
 		s.historyFile = f
+		s.stateMu.Lock()
 		s.histPath = path
+		s.stateMu.Unlock()
+		agenttools.AllowPath(path)
 	}
 	return len(msgs), nil
 }

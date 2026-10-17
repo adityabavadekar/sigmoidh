@@ -840,7 +840,6 @@ func (l *TerminalLogger) OnRunComplete(stats *RunStats) {
 		return
 	}
 	l.PrintSummaryLine(stats)
-	fmt.Fprintf(l.w, "%sGoodbye!%s\n", ansiDim, ansiReset)
 }
 
 func (l *TerminalLogger) OnPrintUsageStats(stats *RunStats) {

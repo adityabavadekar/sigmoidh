@@ -183,6 +183,10 @@ func generateSystemPrompt(basePrompt string, readOnlyMode bool, workDir string) 
 	b.WriteString(memoryFilePath())
 	b.WriteString(".")
 
+	b.WriteString("\n\nThis session's transcript is saved as JSONL under ")
+	b.WriteString(filepath.Join(homeDir(), ".sigmoidh", "history"))
+	b.WriteString("; once the conversation starts the current file can be re-read with the read tool for read-only context.")
+
 	if cmd := agenttools.ConfiguredTestCommand(workDir); cmd != "" {
 		b.WriteString("\n\nTest command (pinned by the user): ")
 		b.WriteString(cmd)
@@ -203,6 +207,11 @@ func generateSystemPrompt(basePrompt string, readOnlyMode bool, workDir string) 
 		b.WriteString(usefulBinariesPrompt)
 		b.WriteString(" ")
 		b.WriteString(strings.Join(binaries, ", "))
+	}
+
+	if cat := skillCatalogText(workDir); cat != "" {
+		b.WriteString("\n\nRecipes for common artifact tasks (slides, video, docs, spreadsheets, diagrams, images, audio). Before starting one of these, call the skill tool with op=load and the matching name; it names the concrete tooling to use:\n")
+		b.WriteString(cat)
 	}
 
 	if branch := getGitBranch(workDir); branch != "" {

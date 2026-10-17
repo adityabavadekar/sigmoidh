@@ -11,8 +11,11 @@ func runBash(ctx context.Context, command string, workDir string) (string, bool)
 	if strings.TrimSpace(command) == "" {
 		return "Refused: empty command. Provide the shell command to run.", true
 	}
-	if _, blocked := destructiveCommandOnProtectedPath(command, workDir); blocked {
-		return refusalBashDestructive, true
+	if isBackgroundedSimpleSleep(command) {
+		return "Refused: plain sleep +'&' is still just a wait. Run bash with a plain sleep (blocks, returns after the wait), or schedule op=once for timer/reminder.", true
+	}
+	if segment, blocked := destructiveCommandOnProtectedPath(command, workDir); blocked {
+		return BlockedCommandRefusal(segment), true
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, bashTimeout)

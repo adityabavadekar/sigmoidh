@@ -515,6 +515,28 @@ func TestExecSession(t *testing.T) {
 	}
 }
 
+func TestExecSessionRefusesPlainSleep(t *testing.T) {
+	cwd, _ := os.Getwd()
+	for _, cmd := range []string{"sleep 10", "sleep 0.5", "sleep 2s", "sleep 10 &"} {
+		out, isErr := startExecSession(cmd, 10, cwd)
+		if !isErr || !strings.Contains(out, "Refused") {
+			t.Fatalf("startExecSession(%q) should refuse a plain sleep, got: %s (isErr=%v)", cmd, out, isErr)
+		}
+	}
+}
+
+func TestBashRefusesBackgroundedSleep(t *testing.T) {
+	cwd, _ := os.Getwd()
+	out, isErr := runBash(context.Background(), "sleep 10 &", cwd)
+	if !isErr || !strings.Contains(out, "Refused") {
+		t.Fatalf("runBash(sleep 10 &) should refuse, got: %s (isErr=%v)", out, isErr)
+	}
+	out, isErr = runBash(context.Background(), "echo ok", cwd)
+	if isErr || out != "ok\n" {
+		t.Fatalf("runBash(echo) should still work, got: %s (isErr=%v)", out, isErr)
+	}
+}
+
 func requireDangerousTestSandbox(t *testing.T) {
 	t.Helper()
 

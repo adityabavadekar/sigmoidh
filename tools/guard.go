@@ -138,6 +138,22 @@ func isAllowedPath(r string) bool {
 	return false
 }
 
+// AllowPath adds one exact file path to the allow-list without clearing the
+// others. Used for paths that only become known at runtime (e.g. the current
+// session transcript, whose name is chosen when the first message is written).
+func AllowPath(p string) {
+	if p == "" {
+		return
+	}
+	r := resolveRealPath(filepath.Clean(p))
+	for _, a := range allowedPaths {
+		if a == r {
+			return
+		}
+	}
+	allowedPaths = append(allowedPaths, r)
+}
+
 // isProtectedPath reports whether p resolves to a system root, the user's
 // home directory, or anything nested inside one of them.
 func isProtectedPath(p string) bool {
@@ -381,6 +397,11 @@ func destructiveCommandOnProtectedPath(cmd string, cwd ...string) (string, bool)
 	if isForkBomb(cmd) {
 		return strings.TrimSpace(cmd), true
 	}
+	if gitPushCommitGuard {
+		if segment, blocked := gitPushCommitCommand(cmd); blocked {
+			return segment, true
+		}
+	}
 
 	for _, rawSeg := range shellSegments(cmd) {
 		if len(rawSeg) == 0 {
@@ -444,4 +465,44 @@ func destructiveCommandOnProtectedPath(cmd string, cwd ...string) (string, bool)
 		}
 	}
 	return "", false
+}
+
+// gitPushCommitCommand recognizes push and commit subcommands, including common
+// git global options such as -C and --git-dir before the subcommand.
+func gitPushCommitCommand(cmd string) (string, bool) {
+	for _, rawSeg := range shellSegments(cmd) {
+		if len(rawSeg) < 2 {
+			continue
+		}
+		seg := stripWrappers(rawSeg)
+		if len(seg) < 2 || filepath.Base(seg[0]) != "git" {
+			continue
+		}
+		for i := 1; i < len(seg); i++ {
+			tok := seg[i]
+			if tok == "push" || tok == "commit" {
+				return strings.Join(rawSeg, " "), true
+			}
+			if tok == "-C" || tok == "-c" || tok == "--git-dir" || tok == "--work-tree" || tok == "--namespace" || tok == "--exec-path" {
+				i++ // these global options consume a value
+				continue
+			}
+			if !strings.HasPrefix(tok, "-") {
+				break // first non-option is another subcommand
+			}
+		}
+	}
+	return "", false
+}
+
+// BlockedCommandRefusal returns the refusal message for a segment blocked by
+// destructiveCommandOnProtectedPath: the git push/commit guard's message when
+// that guard owns the match, otherwise the generic destructive-path refusal.
+func BlockedCommandRefusal(segment string) string {
+	if gitPushCommitGuard {
+		if _, blocked := gitPushCommitCommand(segment); blocked {
+			return refusalBashGitPushCommit
+		}
+	}
+	return refusalBashDestructive
 }

@@ -177,8 +177,8 @@ func tailLines(s string, n int) string {
 // runShell runs a command the way bash does (sandboxed when enabled, same
 // destructive-command guard) with a custom timeout.
 func runShell(ctx context.Context, command, workDir string, timeout time.Duration) (out string, exitErr error, timedOut bool) {
-	if _, blocked := destructiveCommandOnProtectedPath(command, workDir); blocked {
-		return refusalBashDestructive, fmt.Errorf("refused"), false
+	if segment, blocked := destructiveCommandOnProtectedPath(command, workDir); blocked {
+		return BlockedCommandRefusal(segment), fmt.Errorf("refused"), false
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

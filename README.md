@@ -1,6 +1,9 @@
 # Sigmoidh
 
-Simple Terminal coding agent in Go - CLI, full-screen TUI, and a JSON event stream for scripts.
+Simple Terminal coding agent in Go - CLI, TUI, and a JSON event stream for scripts.
+
+[Build](#build) · [Run](#run) · [Tests](#tests) · [Providers](#supported-providers)
+
 
 | CLI | TUI (`-tui`) |
 |---|---|
@@ -8,15 +11,16 @@ Simple Terminal coding agent in Go - CLI, full-screen TUI, and a JSON event stre
 
 <sub>Unedited runs on `liquid/lfm-2.5-2.6b:free` on OpenRouter. Recorded with `demo/record.sh`</sub>
 
-## Build
+## Setup
+
+### Build
 
 ```bash
 go mod tidy
 go build -o sigmoidh ./cmd/sigmoidh
 ```
 
-## Run
-
+### Run
 
 ```bash
 ./sigmoidh                                        # Interactive CLI
@@ -27,38 +31,30 @@ go build -o sigmoidh ./cmd/sigmoidh
 
 - API keys: `~/.sigmoidh/.env` / `$PWD/.env` / `SIGMOIDH_ENV_FILE=/path/.env`
 - Useful flags: `-provider`, `-model`, `-readonly`, `-session <id>`, `-list-sessions`.
+- List agent tools: `-list-tools`.
 - Help: CLI - `-help`, Slash-commands - `/help`.
+- Evals
+    ```bash
+    ./sigmoidh -eval-tasks demo/evals/tasks.json -eval-runs 2 -provider groq
+    ```
 
-### Tools
-
-```bash
-./sigmoidh -list-tools
-```
-
-### Evals
-
-```bash
-./sigmoidh -eval-tasks demo/evals/tasks.json -eval-runs 2 -provider groq
-```
-
-Runs tasks against fixture copies in a Bubblewrap sandbox and reports pass rate, turns, tool calls, errors, and token usage. Per-run logs are stored as JSONL.
+    Runs tasks against fixture copies in a Bubblewrap sandbox and reports pass rate, turns, tool calls, errors, and token usage. Per-run logs are stored as JSONL.
 
 ## Tests
 
 Tests run dangerous commands such as `rm -rf`, so running commands in a container is must.
 
 1. Build container
-```
-docker build  -t sigmoidh-test . -f Dockerfile.test
-```
+    ```
+    docker build  -t sigmoidh-test . -f Dockerfile.test
+    ```
 
 2. Use `test.sh` 
-
-This runs test suite in a Docker container with a shared volume, so go does not fetch modules again and again. 
-```
-chmod +x test.sh
-./test.sh
-```
+    This runs test suite in a Docker container with a shared volume, so go does not fetch modules again and again. 
+    ```
+    chmod +x test.sh
+    ./test.sh
+    ```
 
 In case modules were updated, repeat Steps 1 and 2.
 
@@ -73,7 +69,6 @@ In case modules were updated, repeat Steps 1 and 2.
 | `groq` | `GROQ_API_KEY` |
 
 Extra accounts: Add accounts as `<VAR>_ACC_1`, `<VAR>_ACC_2`, etc. Rate-limited keys fall back to other configured accounts and providers.
-
 
 > **Note:** the Minecraft-themed [website](https://adityabavadekar.github.io/sigmoidh) was itself built by Sigmoidh running the `ox-alpha` model via OpenRouter.
 

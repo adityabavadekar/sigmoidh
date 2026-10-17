@@ -63,20 +63,27 @@ func (st *RunStats) merge(o *RunStats) {
 }
 
 type Sigmoidh struct {
-	client       *litellm.Client
-	model        string
-	workDir      string
-	system       string
-	messages     []litellm.Message
-	historyFile  *os.File
-	histPath     string
-	lastTexts    []string
-	observer     AgentObserver
-	debug        bool
-	stats        *RunStats
-	depth        int
-	noHistory    bool
-	excludeTools map[string]bool
+	backgroundCtx   context.Context
+	backgroundEnd   context.CancelFunc
+	agentEvents     chan string
+	client          *litellm.Client
+	model           string
+	workDir         string
+	system          string
+	messages        []litellm.Message
+	historyFile     *os.File
+	histPath        string
+	title           string
+	lastTexts       []string
+	observer        AgentObserver
+	runMu           sync.Mutex
+	eventWorkerOnce sync.Once
+	stateMu         sync.RWMutex
+	debug           bool
+	stats           *RunStats
+	depth           int
+	noHistory       bool
+	excludeTools    map[string]bool
 
 	providers          []providerAlt // [0] = primary, rest are failovers
 	providerIndex      int
@@ -85,7 +92,10 @@ type Sigmoidh struct {
 	triggers           []string // pending run_complete notification messages
 	memory             *memoryStore
 	pendingAsk         *string // set by ask_user; ends the turn after tools
+	away               bool
+	caveman            bool
 	plan               *planStore
+	tasks              *taskScheduler
 	scrub              *thinkScrubber
 	budget             *iterationBudget
 	cleanAnswer        strings.Builder
@@ -99,10 +109,15 @@ type Sigmoidh struct {
 
 // AddNote queues a short note for the model, delivered with the next user
 // message (e.g. "the user reverted your changes with /undo").
-func (s *Sigmoidh) AddNote(note string) { s.pendingNotes = append(s.pendingNotes, note) }
+func (s *Sigmoidh) AddNote(note string) {
+	s.stateMu.Lock()
+	s.pendingNotes = append(s.pendingNotes, note)
+	s.stateMu.Unlock()
+}
 
 type historyEntry struct {
 	Timestamp string            `json:"ts"`
+	Title     string            `json:"title,omitempty"`
 	Role      string            `json:"role"`
 	Content   string            `json:"content,omitempty"`
 	Reasoning string            `json:"reasoning,omitempty"`
@@ -142,22 +157,61 @@ func (s *Sigmoidh) ReplHistoryFilePath() string {
 }
 
 func NewSigmoidh(client *litellm.Client, model, system, workDir string, observer AgentObserver, readOnlyMode *bool, debug *bool) *Sigmoidh {
+	backgroundCtx, backgroundEnd := context.WithCancel(context.Background())
 	s := &Sigmoidh{
-		client:   client,
-		model:    model,
-		workDir:  workDir,
-		system:   system,
-		messages: []litellm.Message{litellm.System(system)},
-		observer: observer,
-		debug:    *debug,
-		stats:    &RunStats{},
-		memory:   newMemoryStore(),
-		plan:     newPlanStore(),
-		scrub:    &thinkScrubber{},
-		budget:   newIterationBudget(0),
+		backgroundCtx: backgroundCtx,
+		backgroundEnd: backgroundEnd,
+		agentEvents:   make(chan string, 64),
+		client:        client,
+		model:         model,
+		workDir:       workDir,
+		system:        system,
+		messages:      []litellm.Message{litellm.System(system)},
+		observer:      observer,
+		debug:         *debug,
+		stats:         &RunStats{},
+		memory:        newMemoryStore(),
+		plan:          newPlanStore(),
+		tasks:         newTaskScheduler(),
+		scrub:         &thinkScrubber{},
+		budget:        newIterationBudget(0),
 	}
 	agenttools.SetReadOnlyMode(*readOnlyMode)
 	registerHostTools(s)
+	agenttools.SetExecSessionDoneHandler(func(result agenttools.ExecSessionResult) {
+		if s.backgroundCtx.Err() != nil {
+			return
+		}
+		output := strings.TrimSpace(result.Output)
+		if output == "" {
+			output = "(no output)"
+		} else if runes := []rune(output); len(runes) > 4000 {
+			output = string(runes[:4000]) + "\n...[truncated]"
+		}
+		exit := "exit status 0"
+		if result.Err != nil {
+			exit = result.Err.Error()
+		}
+		event := fmt.Sprintf("Background command session %d completed.\nExit: %s\nOutput:\n%s\nReview the result and continue any unfinished part of the user's task. Do not repeat the command unchanged if it failed.", result.ID, exit, output)
+		// An exit with no output and no error has nothing for the model to
+		// review; starting a whole agent turn for it wastes a run. Deliver it
+		// as a note and a ping instead, and hand full turns only to
+		// completions that carry output or an error.
+		if result.Err == nil && strings.TrimSpace(result.Output) == "" {
+			s.AddNote(event)
+			s.observer.OnTriggerFired(fmt.Sprintf("Background command session %d completed (exit status 0, no output).", result.ID))
+			notifyFn("Sigmoidh command finished", fmt.Sprintf("Background command session %d completed (exit status 0, no output).", result.ID))
+			return
+		}
+		if s.IsRunning() {
+			s.deliverAgentEvent(event)
+			return
+		}
+		message := fmt.Sprintf("Background command session %d completed (exit: %s). The output was queued as a note for the next turn; check status or poll the session for the full output.", result.ID, exit)
+		s.AddNote(event)
+		notifyFn("Sigmoidh command finished", message)
+		s.observer.OnTriggerFired(message)
+	})
 
 	return s
 }
@@ -174,6 +228,12 @@ func (s *Sigmoidh) SetProviders(primary providerAlt, alts []providerAlt) {
 }
 
 func (s *Sigmoidh) Close() {
+	if s.backgroundEnd != nil {
+		s.backgroundEnd()
+	}
+	if s.tasks != nil {
+		s.tasks.Close()
+	}
 	if s.historyFile != nil {
 		s.historyFile.Close()
 	}
@@ -182,10 +242,51 @@ func (s *Sigmoidh) Close() {
 // CurrentSessionName returns the base name of the transcript this session is
 // writing to, or "" before the first message is recorded.
 func (s *Sigmoidh) CurrentSessionName() string {
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
 	if s.histPath == "" {
 		return ""
 	}
 	return strings.TrimSuffix(filepath.Base(s.histPath), ".jsonl")
+}
+
+// CurrentSessionTitle returns the title generated from the first user prompt.
+func (s *Sigmoidh) CurrentSessionTitle() string {
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
+	return s.title
+}
+
+func (s *Sigmoidh) setSessionTitle(title string) {
+	s.stateMu.Lock()
+	s.title = title
+	s.stateMu.Unlock()
+}
+
+func (s *Sigmoidh) IsAway() bool {
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
+	return s.away
+}
+
+func (s *Sigmoidh) SetAway(away bool) {
+	s.stateMu.Lock()
+	s.away = away
+	s.stateMu.Unlock()
+}
+
+func (s *Sigmoidh) IsRunning() bool {
+	if !s.runMu.TryLock() {
+		return true
+	}
+	s.runMu.Unlock()
+	return false
+}
+
+func (s *Sigmoidh) currentHistoryPath() string {
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
+	return s.histPath
 }
 
 func (s *Sigmoidh) PrintStats() {
@@ -211,7 +312,12 @@ func (s *Sigmoidh) writeHistory(entry historyEntry) {
 			return
 		}
 		s.historyFile = f
+		s.stateMu.Lock()
 		s.histPath = fname
+		s.stateMu.Unlock()
+		// Let the agent re-read its own transcript: the path is under the
+		// protected home dir, so it must be explicitly allowed.
+		agenttools.AllowPath(fname)
 		if entry.Role != "system" && s.system != "" {
 			s.writeRawHistory(historyEntry{
 				Timestamp: time.Now().Format(time.RFC3339),
@@ -233,7 +339,7 @@ func (s *Sigmoidh) writeRawHistory(entry historyEntry) {
 		return
 	}
 	if _, err := s.historyFile.Write(append(data, '\n')); err != nil {
-		logError("history write failed", "path", s.histPath, "err", err)
+		logError("history write failed", "path", s.currentHistoryPath(), "err", err)
 	}
 }
 
@@ -273,6 +379,37 @@ func callSignature(calls []litellm.ToolUseBlock) string {
 		parts = append(parts, c.Name+":"+string(c.Arguments))
 	}
 	return strings.Join(parts, "|")
+}
+
+const changedResultAdvisory = 4
+
+// resultSignature fingerprints a whole turn's tool outcomes, trimmed per
+// result so huge outputs don't dominate the comparison.
+func resultSignature(outcomes []toolOutcome) string {
+	var b strings.Builder
+	for _, o := range outcomes {
+		if o.isErr {
+			b.WriteString("E|")
+		} else {
+			b.WriteString("O|")
+		}
+		r := []rune(strings.TrimSpace(o.out))
+		if len(r) > 300 {
+			r = r[:300]
+		}
+		b.WriteRune(rune(0x1f)) // unit separator between results
+		b.WriteString(string(r))
+	}
+	return b.String()
+}
+
+func outcomesAllErrors(outcomes []toolOutcome) bool {
+	for _, o := range outcomes {
+		if !o.isErr {
+			return false
+		}
+	}
+	return true
 }
 
 func truncateSig(s string) string {
@@ -337,7 +474,93 @@ func isOutputTokenLimitError(err error) bool {
 }
 
 func (s *Sigmoidh) Run(ctx context.Context, input string) error {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
 	return s.run(ctx, input, s.maxTurns)
+}
+
+func (s *Sigmoidh) runScheduledTask(input string) {
+	s.executeScheduledTask(input, true)
+}
+
+func (s *Sigmoidh) runCronTask(input string) {
+	s.executeScheduledTask(input, false)
+}
+
+func (s *Sigmoidh) deliverAgentEvent(event string) bool {
+	if s.agentEvents == nil {
+		return false
+	}
+	s.eventWorkerOnce.Do(func() { go s.processAgentEvents() })
+	ctx := s.backgroundCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case s.agentEvents <- strings.TrimSpace(event):
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (s *Sigmoidh) processAgentEvents() {
+	ctx := s.backgroundCtx
+	if ctx == nil {
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event := <-s.agentEvents:
+			if strings.TrimSpace(event) != "" {
+				s.processAgentEvent(ctx, event)
+			}
+		}
+	}
+}
+
+func (s *Sigmoidh) processAgentEvent(ctx context.Context, event string) {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	if ctx.Err() != nil {
+		return
+	}
+	prompt := "Background event: " + event
+	notifyUserInput(s.observer, prompt)
+	s.observer.OnTriggerFired("Resuming the agent to process a background command completion.")
+	err := s.run(ctx, prompt, s.maxTurns)
+	s.OnRunComplete()
+	s.fireRunCompleteTriggers()
+	if err != nil {
+		s.observer.OnTriggerFired("Background event follow-up failed: " + err.Error())
+		return
+	}
+}
+
+func (s *Sigmoidh) executeScheduledTask(input string, wait bool) {
+	if wait {
+		s.runMu.Lock()
+	} else if !s.runMu.TryLock() {
+		s.observer.OnTriggerFired("Scheduled task skipped because another run is still active: " + input)
+		return
+	}
+	defer s.runMu.Unlock()
+	s.observer.OnTriggerFired("Starting scheduled task: " + input)
+	notifyUserInput(s.observer, input)
+	ctx := s.backgroundCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	err := s.run(ctx, input, s.maxTurns)
+	s.OnRunComplete()
+	s.fireRunCompleteTriggers()
+	if err != nil {
+		s.observer.OnTriggerFired("Scheduled task failed: " + err.Error())
+		return
+	}
+	notifyFn("Sigmoidh scheduled task finished", input)
 }
 
 // runToolSafe executes one tool call, converting a panic inside the tool (or
@@ -377,21 +600,33 @@ func (s *Sigmoidh) run(ctx context.Context, input string, maxTurns int) (err err
 		// one checkpoint per user prompt: /undo reverts a whole run
 		agenttools.BeginCheckpoint(firstLine(input, 60))
 	}
+	if s.CurrentSessionTitle() == "" {
+		s.setSessionTitle(sessionTitle(input))
+	}
+	if directives := s.modeDirectives(); directives != "" {
+		input = directives + "\n\n" + input
+	}
+	s.stateMu.Lock()
 	if len(s.pendingNotes) > 0 {
 		input = strings.Join(s.pendingNotes, "\n") + "\n\n" + input
 		s.pendingNotes = nil
 	}
+	s.stateMu.Unlock()
 	s.messages = append(s.messages, litellm.UserText(input))
 	s.writeHistory(historyEntry{
 		Timestamp: time.Now().Format(time.RFC3339),
+		Title:     s.CurrentSessionTitle(),
 		Role:      "user",
 		Content:   input,
 	})
+	s.pendingAsk = nil
 
 	retriedEmpty := false
 	compactedForLimit := false
 	var lastCallSig string
 	identicalStreak := 0
+	var lastResultSig string
+	changedResultStreak := 0
 	failedCalls := map[string]int{} // tool name+args → failures this run
 
 	// No hard turn cap by default: a long build is legitimate work, and the
@@ -498,6 +733,29 @@ func (s *Sigmoidh) run(ctx context.Context, input string, maxTurns int) (err err
 			}
 		}
 
+		if len(calls) > 0 {
+			callSig := callSignature(calls)
+			resultSig := resultSignature(outcomes)
+			if callSig == lastCallSig {
+				if resultSig == lastResultSig || outcomesAllErrors(outcomes) {
+					identicalStreak++
+					changedResultStreak = 0
+				} else {
+					identicalStreak = 1
+					changedResultStreak++
+				}
+			} else {
+				identicalStreak, changedResultStreak = 1, 0
+			}
+			lastCallSig, lastResultSig = callSig, resultSig
+			if changedResultStreak >= changedResultAdvisory && changedResultStreak%changedResultAdvisory == 0 {
+				outcomes[0].out += fmt.Sprintf("\n\n[note: this exact call repeated %d times with changing results. Waiting on background exec? Notified on exit — stop repeating. If not progressing, change approach.]", changedResultStreak)
+			}
+		} else {
+			lastCallSig, lastResultSig = "", ""
+			identicalStreak, changedResultStreak = 0, 0
+		}
+
 		for i, call := range calls {
 			s.observer.OnToolResult(call.Name, outcomes[i].out, outcomes[i].isErr, outcomes[i].took)
 			logInfo("tool result", "tool", call.Name, "is_err", outcomes[i].isErr,
@@ -528,26 +786,19 @@ func (s *Sigmoidh) run(ctx context.Context, input string, maxTurns int) (err err
 			return nil // user answers via their next message
 		}
 
-		// Loop guard: the model repeating the byte-identical tool call is a
-		// degenerate state — stop it with feedback instead of burning turns.
-		if len(calls) > 0 {
-			sig := callSignature(calls)
-			if sig == lastCallSig {
-				identicalStreak++
-			} else {
-				identicalStreak = 1
-				lastCallSig = sig
-			}
-			if identicalStreak >= maxIdenticalCalls {
-				return fmt.Errorf("agent repeated an identical tool call %d times (possible loop); last: %s %s",
-					identicalStreak, calls[0].Name, truncateSig(string(calls[0].Arguments)))
-			}
-		} else {
-			lastCallSig = ""
-			identicalStreak = 0
+		// Loop guard: the model repeating the byte-identical tool call AND
+		// getting the same output back is a degenerate state — stop it with
+		// feedback instead of burning turns. Polling calls whose results
+		// genuinely change (e.g. status timestamps) are not loops.
+		if identicalStreak >= maxIdenticalCalls {
+			return fmt.Errorf("agent repeated an identical tool call %d times with identical results (possible loop); last: %s %s",
+				identicalStreak, calls[0].Name, truncateSig(string(calls[0].Arguments)))
 		}
 
 		if len(calls) == 0 {
+			if reason := degenerateRepetition(textResp); reason != "" {
+				return fmt.Errorf("model output degenerated into repetition (%s); stopping the run", reason)
+			}
 			if textResp == "" {
 				if !retriedEmpty {
 					retriedEmpty = true

@@ -25,6 +25,9 @@ func (s *Sigmoidh) handleAskUser(_ context.Context, raw json.RawMessage, _ strin
 	if q == "" {
 		return "question is required", true
 	}
+	if s.IsAway() {
+		return "Away mode: user must not be interrupted. Don't ask; continue with conservative, reversible choices. Away never authorizes destructive, irreversible, external or wider-scope actions, nor bypassing safeguards. If confirmation needed: skip the action, continue safe work, report the limit.", false
+	}
 
 	card := "❓ " + q
 	if len(a.Options) > 0 {

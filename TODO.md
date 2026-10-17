@@ -1,0 +1,28 @@
+# TODOs
+- [x] Timers, Cron Jobs, and Scheduling
+- [x] Run tasks in Background
+- Auto discovery of other coding agents and designation, extracting context from their work and using it to improve the current agent's work.
+- [x] Sensible contexts as a combined skill: Generating Videos, Images, Video Editing, TTS, Generating Presentation, Kaggle-terminal, Checking PR, ... (maybe too much is bloatware)
+- Asking Questions to the user for options and preferences
+- Automatic Sense about other coding agents working on the same project.
+- [x] Blocking `git push` or `git commit` command using slash commands
+- [x] Make slash commands non-blocking, user can run certain slash commands even when the agent performing the task.
+- [x] Generate Title for the session on first run.
+- [x] Slash command for 'My credits are about to get over, please summarize the work done in a way that another agent can continue the work.'
+- [x] Allow generating `.md` session transcript for the current session.
+- Of course add 'Sub-agents'
+- Browser use/automation
+- Workflow files that are declarative and can be used to generate a workflow for the agent to follow.
+- [x] Detect recurring model loop flaws (such as older gemini models get stuck in) or even repeated words being generated.
+- Fix overthinking in bit small and dumb models
+- Calibrate tool desc and outputs to get task done in efficient and less calls.
+- Add Monitors
+- [x] "Going away for sometime, please dont ask me any questions and keep working on the task" slash command and of course a "I'm back" slash command to resume the conversation.
+- [x] Deep research mode that keeps pushing the agent to find more and more information about the task at hand and not generate a templated "Executive Summary" or "Research Summary" but something more relevant and useful.
+- [x] Caveman mode
+- [x] Provide agent with context of the current session file too in read-only mode;
+- [x] "Generate an instruction/skill out of this" command.
+- Need to check why demo shows editing but it takes like 5sec for edit to happen
+- Not everything needs .md and .md files are not permanent, so they need to be updated from time to time before commits.
+- "-allow-all" or better for bypass all sec, all reading .env and random commands, random exec whatever needed.
+- Fork

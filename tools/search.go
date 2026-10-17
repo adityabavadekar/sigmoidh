@@ -64,6 +64,16 @@ func RunSearch(query, path, mode string, maxResults int, workDir string) (string
 }
 
 func runSearch(query, path, mode string, maxResults int, workDir string) (string, bool) {
+	return runSearchContext(query, path, mode, maxResults, 0, workDir)
+}
+
+const maxSearchContext = 10
+
+// runSearchContext searches like runSearch and also prints contextLines of
+// surrounding text per match ("path-12-text" lines, groups split by "--"),
+// which saves a read call when the model needs to see the code around a hit.
+func runSearchContext(query, path, mode string, maxResults, contextLines int, workDir string) (string, bool) {
+	contextLines = max(0, min(contextLines, maxSearchContext))
 	mode, maxResults, errText := normalizeSearchOptions(query, mode, maxResults)
 	if errText != "" {
 		return errText, true
@@ -75,13 +85,13 @@ func runSearch(query, path, mode string, maxResults int, workDir string) (string
 	}
 
 	if _, err := exec.LookPath("rg"); err == nil {
-		out, isErr, handled := runRgSearch(query, mode, realPath, realWorkDir, maxResults)
+		out, isErr, handled := runRgSearch(query, mode, realPath, realWorkDir, maxResults, contextLines)
 		if handled {
 			return out, isErr
 		}
 	}
 
-	return runManualSearch(query, mode, realPath, realWorkDir, maxResults)
+	return runManualSearch(query, mode, realPath, realWorkDir, maxResults, contextLines)
 }
 
 func normalizeSearchOptions(query, mode string, maxResults int) (string, int, string) {
@@ -127,7 +137,7 @@ func resolveSearchRoot(path, workDir string) (string, string, string) {
 	return realPath, realWorkDir, ""
 }
 
-func runRgSearch(query, mode, realPath, workDir string, maxResults int) (string, bool, bool) {
+func runRgSearch(query, mode, realPath, workDir string, maxResults, contextLines int) (string, bool, bool) {
 	args := []string{
 		"--line-number",
 		"--column",
@@ -143,6 +153,9 @@ func runRgSearch(query, mode, realPath, workDir string, maxResults int) (string,
 	}
 	if mode == "literal" {
 		args = append(args, "--fixed-strings")
+	}
+	if contextLines > 0 {
+		args = append(args, "--context", strconv.Itoa(contextLines))
 	}
 
 	args = append(args, "--", query, realPath)
@@ -162,7 +175,7 @@ func runRgSearch(query, mode, realPath, workDir string, maxResults int) (string,
 	return formatRawOutput(stdout.String(), workDir, maxResults), false, true
 }
 
-func runManualSearch(query, mode, searchRoot, workDir string, maxResults int) (string, bool) {
+func runManualSearch(query, mode, searchRoot, workDir string, maxResults, contextLines int) (string, bool) {
 	var matcher func(line string) (int, bool)
 
 	if mode == "literal" {
@@ -242,23 +255,46 @@ func runManualSearch(query, mode, searchRoot, workDir string, maxResults int) (s
 		scanner := bufio.NewScanner(file)
 		scanBuf := make([]byte, 64*1024)
 		scanner.Buffer(scanBuf, maxScannerBuf)
-
-		lineNum := 1
+		var lines []string
 		for scanner.Scan() {
-			line := scanner.Text()
-			if col, found := matcher(line); found {
-				relPath, _ := filepath.Rel(workDir, p)
-				cleanedLine := sanitizeLine(line)
-				results = append(results, fmt.Sprintf("%s:%d:%d:%s", relPath, lineNum, col, cleanedLine))
-				matchCount++
-				if matchCount >= maxResults {
-					file.Close()
-					return fs.SkipAll
-				}
-			}
-			lineNum++
+			lines = append(lines, scanner.Text())
 		}
 		file.Close()
+
+		relPath, _ := filepath.Rel(workDir, p)
+		lastShown := -1
+		for i, line := range lines {
+			col, found := matcher(line)
+			if !found {
+				continue
+			}
+			if contextLines > 0 {
+				from := max(i-contextLines, lastShown+1)
+				if lastShown >= 0 && from > lastShown+1 {
+					results = append(results, "--")
+				} else if lastShown < 0 && len(results) > 0 {
+					results = append(results, "--") // new file
+				}
+				for k := from; k < i; k++ {
+					results = append(results, fmt.Sprintf("%s-%d-%s", relPath, k+1, sanitizeLine(lines[k])))
+				}
+			}
+			results = append(results, fmt.Sprintf("%s:%d:%d:%s", relPath, i+1, col, sanitizeLine(line)))
+			lastShown = i
+			matchCount++
+			if contextLines > 0 {
+				for k := i + 1; k <= min(i+contextLines, len(lines)-1); k++ {
+					if _, hit := matcher(lines[k]); hit {
+						break // the next match prints its own context
+					}
+					results = append(results, fmt.Sprintf("%s-%d-%s", relPath, k+1, sanitizeLine(lines[k])))
+					lastShown = k
+				}
+			}
+			if matchCount >= maxResults {
+				return fs.SkipAll
+			}
+		}
 		return nil
 	})
 
@@ -272,6 +308,9 @@ func runManualSearch(query, mode, searchRoot, workDir string, maxResults int) (s
 	return strings.Join(results, "\n"), false
 }
 
+// rgContextLine matches ripgrep context output: "path-12-text".
+var rgContextLine = regexp.MustCompile(`^(.+?)-(\d+)-(.*)$`)
+
 func formatRawOutput(raw, workDir string, maxResults int) string {
 	raw = strings.TrimRight(raw, "\r\n")
 	if raw == "" {
@@ -281,11 +320,25 @@ func formatRawOutput(raw, workDir string, maxResults int) string {
 	lines := strings.Split(raw, "\n")
 	var formatted []string
 
-	for i, line := range lines {
-		if i >= maxResults {
+	matches := 0
+	for _, line := range lines {
+		if line == "--" { // rg context group separator
+			formatted = append(formatted, line)
+			continue
+		}
+		if m := rgContextLine.FindStringSubmatch(line); m != nil {
+			file := m[1]
+			if rel, err := filepath.Rel(workDir, file); err == nil && !strings.HasPrefix(rel, "..") {
+				file = rel
+			}
+			formatted = append(formatted, fmt.Sprintf("%s-%s-%s", file, m[2], sanitizeLine(m[3])))
+			continue
+		}
+		if matches >= maxResults {
 			formatted = append(formatted, fmt.Sprintf("... [truncated, reached limit of %d results]", maxResults))
 			break
 		}
+		matches++
 
 		parts := strings.SplitN(line, ":", 4)
 		if len(parts) == 4 {

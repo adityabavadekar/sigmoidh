@@ -1,21 +1,47 @@
 # Sigmoidh
 
-Simple Harness in Go. Tools: bash, read, write.
+Simple Terminal coding agent in Go - CLI, full-screen TUI, and a JSON event stream for scripts.
+
+| CLI | TUI (`-tui`) |
+|---|---|
+| ![Sigmoidh CLI: reads main.go, explains it, then edits it with a diff preview](docs/media/cli.gif) | ![Sigmoidh full-screen TUI: rewrites fib as an iterative function](docs/media/tui.gif) |
+
+<sub>Unedited runs on `liquid/lfm-2.5-2.6b:free` on OpenRouter. Recorded with `demo/record.sh`</sub>
 
 ## Build
 
 ```bash
 go mod tidy
-go build -o sigmoidh .
+go build -o sigmoidh ./cmd/sigmoidh
 ```
 
 ## Run
 
-Export the API key and run:
 
 ```bash
-./sigmoidh
+./sigmoidh                                        # Interactive CLI
+./sigmoidh -tui                                   # TUI
+./sigmoidh "fix the failing test"                 # One-shot prompt
+./sigmoidh -json "summarize main.go" | jq .       # JSONL events
 ```
+
+- API keys: `~/.sigmoidh/.env` / `$PWD/.env` / `SIGMOIDH_ENV_FILE=/path/.env`
+- Useful flags: `-provider`, `-model`, `-readonly`, `-session <id>`, `-list-sessions`.
+- Help: CLI - `-help`, Slash-commands - `/help`.
+
+### Tools
+
+```bash
+./sigmoidh -list-tools
+```
+
+### Evals
+
+```bash
+./sigmoidh -eval-tasks demo/evals/tasks.json -eval-runs 2 -provider groq
+```
+
+Runs tasks against fixture copies in a Bubblewrap sandbox and reports pass rate, turns, tool calls, errors, and token usage. Per-run logs are stored as JSONL.
 
 ## Tests
 
@@ -37,15 +63,19 @@ chmod +x test.sh
 In case modules were updated, repeat Steps 1 and 2.
 
 ## Supported Providers
-- OpenAI
-- Anthropic
-- OpenRouter
 
-Although the project uses LiteLLM module which supports most of well known providers, `provider.go` needs to be updated to handle the provider-specific calling.
+| `-provider` | API key Variables |
+|---|---|
+| `openrouter` (default) | `OPENROUTER_API_KEY` |
+| `anthropic` | `ANTHROPIC_API_KEY` |
+| `openai` | `OPENAI_API_KEY` |
+| `gemini` | `GEMINI_API_KEY` / `GOOGLE_API_KEY` |
+| `groq` | `GROQ_API_KEY` |
 
-You can also use `task` tool.
+Extra accounts: Add accounts as `<VAR>_ACC_1`, `<VAR>_ACC_2`, etc. Rate-limited keys fall back to other configured accounts and providers.
 
-> **Dogfooding note:** the Minecraft-themed website in [`website/`](website/) was itself built by Sigmoidh running the `ox-alpha` model via OpenRouter. The agent dug, the model decided, the blocks placed themselves.
+
+> **Note:** the Minecraft-themed [website](https://adityabavadekar.github.io/sigmoidh) was itself built by Sigmoidh running the `ox-alpha` model via OpenRouter.
 
 ## License
 

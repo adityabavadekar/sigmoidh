@@ -91,7 +91,7 @@ func TestSearchSubdirectoryAndRelativePath(t *testing.T) {
 func TestSearchPureGoFallback(t *testing.T) {
 	workDir := setupTestWorkspace(t)
 
-	out, isErr := runManualSearch("TARGET_STRING_ALPHA", "literal", workDir, workDir, 10)
+	out, isErr := runManualSearch("TARGET_STRING_ALPHA", "literal", workDir, workDir, 10, 0)
 	if isErr {
 		t.Fatalf("runManualSearch failed: %s", out)
 	}

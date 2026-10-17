@@ -1,5 +1,7 @@
-sigmoidh
+/sigmoidh
 .env
 .pnpm-store/
 node_modules/
 website/dist/
+demo/work/
+demo/out/

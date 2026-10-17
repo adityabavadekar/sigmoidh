@@ -388,7 +388,7 @@ func TestRunReadGuards(t *testing.T) {
 		t.Errorf("runRead(valid) should succeed, got error: %s", out)
 	}
 
-	goModPath = filepath.Join("..", "main.go")
+	goModPath = filepath.Join("..", "cmd", "sigmoidh", "main.go")
 	if out, isErr := runRead(goModPath, 0, 0, false); isErr {
 		t.Errorf("runRead(valid) should succeed, got error: %s", out)
 	}
@@ -403,7 +403,7 @@ func TestRunReadFormatting(t *testing.T) {
 	if isErr {
 		t.Fatalf("runRead(offset/limit) failed: %s", out)
 	}
-	want := "two\n\n[1 more lines in file. Use offset=3 to continue.]"
+	want := "two\n\n[lines 2-2 of 3 shown. Continue with offset=3; code_nav outline or search can find a specific part.]"
 	if out != want {
 		t.Fatalf("runRead(offset/limit) = %q, want %q", out, want)
 	}
@@ -429,16 +429,16 @@ func TestRunWriteGuards(t *testing.T) {
 	dir := t.TempDir()
 	cwd, _ := os.Getwd()
 
-	if out, isErr := runWrite(filepath.Join(dir, ".env"), "SECRET=1", cwd); !isErr {
+	if out, isErr := runWrite(context.Background(), filepath.Join(dir, ".env"), "SECRET=1", cwd); !isErr {
 		t.Errorf("runWrite(.env) should refuse, got ok output: %s", out)
 	}
 
-	if out, isErr := runWrite("/etc/should-not-write", "x", cwd); !isErr {
+	if out, isErr := runWrite(context.Background(), "/etc/should-not-write", "x", cwd); !isErr {
 		t.Errorf("runWrite(/etc/...) should refuse, got ok output: %s", out)
 	}
 
 	safe := filepath.Join(dir, "sub", "file.txt")
-	if out, isErr := runWrite(safe, "hello", cwd); isErr {
+	if out, isErr := runWrite(context.Background(), safe, "hello", cwd); isErr {
 		t.Errorf("runWrite(safe path) should succeed, got error: %s", out)
 	}
 	data, _ := os.ReadFile(safe)

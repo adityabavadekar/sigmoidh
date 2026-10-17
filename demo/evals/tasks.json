@@ -1,0 +1,33 @@
+[
+  {
+    "name": "explain",
+    "fixture": "../fixture",
+    "prompt": "what does main.go print? answer in one sentence",
+    "expect": [
+      "fibonacci"
+    ],
+    "check": "go run . | tail -1 | grep -qx 34 && grep -q 'fib(n-1)' main.go",
+    "max_turns": 30
+  },
+  {
+    "name": "doc-comment",
+    "fixture": "../fixture",
+    "prompt": "add a doc comment above fib explaining it",
+    "check": "grep -B1 '^func fib' main.go | grep -q '^//' && gofmt -l main.go | wc -c | grep -qx 0",
+    "max_turns": 30
+  },
+  {
+    "name": "iterative-fib",
+    "fixture": "../fixture",
+    "prompt": "make fib iterative instead of recursive",
+    "check": "go run . | tail -1 | grep -qx 34 && ! grep -q 'fib(n-1)' main.go",
+    "max_turns": 30
+  },
+  {
+    "name": "add-test",
+    "fixture": "../fixture",
+    "prompt": "add a table-driven test for fib in main_test.go and make sure it passes",
+    "check": "test -f main_test.go && go test ./... >/dev/null",
+    "max_turns": 40
+  }
+]

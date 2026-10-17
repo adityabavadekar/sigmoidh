@@ -81,6 +81,21 @@
       </div>
 
       <button class="mc-btn small" id="replay">&#8635; REPLAY RUN</button>
+
+      <p class="sub rec-sub">Or watch the real thing: unedited runs on <code>liquid/lfm-2.5-2.6b:free</code>.</p>
+      <div class="rec-tabs" role="tablist" aria-label="Demo recording">
+        <button class="mc-btn tiny rec-tab" role="tab" aria-selected="true" data-rec="cli">CLI</button>
+        <button class="mc-btn tiny rec-tab" role="tab" aria-selected="false" data-rec="tui">TUI</button>
+      </div>
+      <div class="term rec">
+        <div class="term-bar">
+          <span class="sq s1"></span><span class="sq s2"></span><span class="sq s3"></span>
+          <span class="term-title" id="rec-title">./sigmoidh — 100×30</span>
+        </div>
+        <video id="rec-video" src="/media/cli.mp4" poster="/media/cli.jpg"
+          autoplay muted loop playsinline controls preload="metadata"
+          aria-label="Recording of the sigmoidh CLI"></video>
+      </div>
     </div>
   </section>
 

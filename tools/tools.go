@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/voocel/litellm"
 )
@@ -42,9 +43,10 @@ type writeArgs struct {
 }
 
 type editArgs struct {
-	Path   string `json:"path"`
-	OldStr string `json:"old_str"`
-	NewStr string `json:"new_str"`
+	Path   string   `json:"path"`
+	OldStr string   `json:"old_str"`
+	NewStr string   `json:"new_str"`
+	Edits  []editOp `json:"edits"`
 }
 
 type searchArgs struct {
@@ -52,6 +54,7 @@ type searchArgs struct {
 	Path       string `json:"path"`
 	Mode       string `json:"mode"`
 	MaxResults int    `json:"max_results"`
+	Context    int    `json:"context"`
 }
 
 type listFilesArgs struct {
@@ -83,6 +86,16 @@ type writeStdinArgs struct {
 	Chars       string `json:"chars"`
 	Close       bool   `json:"close"`
 	YieldTimeMS int    `json:"yield_time_ms"`
+}
+
+type codeNavArgs struct {
+	Op     string `json:"op"`
+	Path   string `json:"path"`
+	Symbol string `json:"symbol"`
+}
+
+type runTestsArgs struct {
+	Command string `json:"command"`
 }
 
 type webArgs struct {
@@ -169,19 +182,23 @@ func runToolDirect(ctx context.Context, name string, raw json.RawMessage, workDi
 		if err := json.Unmarshal(raw, &a); err != nil {
 			return err.Error(), true
 		}
-		return runWrite(a.Path, a.Content, workDir)
+		return runWrite(ctx, a.Path, a.Content, workDir)
 	case "edit":
 		var a editArgs
 		if err := json.Unmarshal(raw, &a); err != nil {
 			return err.Error(), true
 		}
-		return runEdit(a.Path, a.OldStr, a.NewStr, workDir)
+		edits := a.Edits
+		if a.OldStr != "" || len(edits) == 0 {
+			edits = append([]editOp{{OldStr: a.OldStr, NewStr: a.NewStr}}, edits...)
+		}
+		return runEdit(ctx, a.Path, edits, workDir)
 	case "search":
 		var a searchArgs
 		if err := json.Unmarshal(raw, &a); err != nil {
 			return err.Error(), true
 		}
-		return runSearch(a.Query, a.Path, a.Mode, a.MaxResults, workDir)
+		return runSearchContext(a.Query, a.Path, a.Mode, a.MaxResults, a.Context, workDir)
 	case "list_files":
 		var a listFilesArgs
 		if err := json.Unmarshal(raw, &a); err != nil {
@@ -215,6 +232,18 @@ func runToolDirect(ctx context.Context, name string, raw json.RawMessage, workDi
 			return err.Error(), true
 		}
 		return writeExecStdin(a.SessionID, a.Chars, a.Close, a.YieldTimeMS)
+	case "code_nav":
+		var a codeNavArgs
+		if err := json.Unmarshal(raw, &a); err != nil {
+			return err.Error(), true
+		}
+		return runCodeNav(ctx, a.Op, a.Path, a.Symbol, workDir)
+	case "run_tests":
+		var a runTestsArgs
+		if err := json.Unmarshal(raw, &a); err != nil {
+			return err.Error(), true
+		}
+		return runTests(ctx, a.Command, workDir)
 	case "web":
 		var a webArgs
 		if err := json.Unmarshal(raw, &a); err != nil {
@@ -222,8 +251,38 @@ func runToolDirect(ctx context.Context, name string, raw json.RawMessage, workDi
 		}
 		return runWeb(ctx, a.URL, a.Query)
 	default:
-		return "unknown tool: " + name, true
+		return unknownToolMessage(name), true
 	}
+}
+
+// toolAliases maps names models commonly reach for (from other harnesses or
+// shell habits) to the correct sigmoidh tool.
+var toolAliases = map[string]string{
+	"find": "list_files", "glob": "list_files", "ls": "list_files", "list": "list_files", "list_dir": "list_files",
+	"grep": "search", "rg": "search", "ripgrep": "search", "search_files": "search", "find_in_files": "search",
+	"cat": "read", "view": "read", "open": "read", "read_file": "read", "open_file": "read",
+	"shell": "bash", "sh": "bash", "run": "bash", "terminal": "bash", "execute": "bash", "run_command": "bash",
+	"str_replace": "edit", "replace": "edit", "edit_file": "edit", "str_replace_editor": "edit", "multi_edit": "edit",
+	"create": "write", "create_file": "write", "write_file": "write",
+	"patch": "apply_patch", "diff": "apply_patch",
+	"fetch": "web", "browse": "web", "web_search": "web", "web_fetch": "web", "curl": "web",
+	"test": "run_tests", "tests": "run_tests",
+	"todo": "plan", "todos": "plan", "todo_write": "plan", "task": "plan",
+	"symbols": "code_nav", "outline": "code_nav", "goto_definition": "code_nav", "find_references": "code_nav",
+}
+
+// unknownToolMessage tells the model what exists instead, with a likely
+// substitute.
+func unknownToolMessage(name string) string {
+	var names []string
+	for _, t := range GetAvailableTools() {
+		names = append(names, t.Name)
+	}
+	msg := fmt.Sprintf("unknown tool %q.", name)
+	if alt, ok := toolAliases[strings.ToLower(name)]; ok {
+		msg += fmt.Sprintf(" Use %s instead.", alt)
+	}
+	return msg + " Available tools: " + strings.Join(names, ", ")
 }
 
 func resolveToolPath(path string, workDir ...string) string {

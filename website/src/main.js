@@ -464,6 +464,23 @@ new IntersectionObserver((ents, obs) => {
   ents.forEach((en) => { if (en.isIntersecting) { playTerminal(); obs.disconnect(); } });
 }, { threshold: 0.3 }).observe($(".term"));
 
+/* ================= real recordings ================= */
+const recVideo = $("#rec-video");
+const REC_TITLES = { cli: "./sigmoidh — 100×30", tui: "./sigmoidh -tui — 100×30" };
+$$(".rec-tab").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    ensureAudio(); sfx.click();
+    const name = btn.dataset.rec;
+    $$(".rec-tab").forEach((b) => b.setAttribute("aria-selected", String(b === btn)));
+    // swap only the file name: the build may rewrite the media base path
+    recVideo.poster = recVideo.poster.replace(/(cli|tui)\.jpg$/, `${name}.jpg`);
+    recVideo.src = recVideo.src.replace(/(cli|tui)\.mp4$/, `${name}.mp4`);
+    recVideo.setAttribute("aria-label", `Recording of the sigmoidh ${name.toUpperCase()}`);
+    $("#rec-title").textContent = REC_TITLES[name];
+    recVideo.play().catch(() => {});
+  });
+});
+
 /* ================= copy buttons ================= */
 $$(".copy").forEach((btn) => {
   btn.addEventListener("click", async () => {

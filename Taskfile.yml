@@ -23,11 +23,11 @@ tasks:
 
   build:
     desc: Build Sigmoidh
-    cmd: go build -o sigmoidh .
+    cmd: go build -o sigmoidh ./cmd/sigmoidh && echo "Done. Run with ./sigmoidh"
 
   run:
     desc: Run Sigmoidh
-    cmd: go run .
+    cmd: go run ./cmd/sigmoidh
 
   clean:
     desc: Remove build artifacts
@@ -39,7 +39,7 @@ tasks:
       - go mod tidy
       - chmod +x .githooks/pre-commit
       - git config core.hooksPath .githooks
-      - go build -o sigmoidh .
+      - go build -o sigmoidh ./cmd/sigmoidh
       - |
         echo
         echo "[+] Sigmoidh setup complete"
@@ -47,4 +47,4 @@ tasks:
         echo "Usage:"
         echo "  task run      Run Sigmoidh"
         echo "  Or"
-        echo "  go run ."
+        echo "  go run ./cmd/sigmoidh"
